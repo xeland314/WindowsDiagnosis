@@ -45,7 +45,7 @@ Write-Host "==================================================" -ForegroundColor
 # ----------------------------------------------------
 # 1. CIFRADO DE DISCO (BitLocker) - LOPDP Art.38
 # ----------------------------------------------------
-Write-Host "[1/5] Verificando cifrado de disco (BitLocker)..." -ForegroundColor Yellow
+Write-Host "[1/10] Verificando cifrado de disco (BitLocker)..." -ForegroundColor Yellow
 $bitlockerRows = ""
 $bitlockerSummary = ""
 $bitlockerBad = 0
@@ -134,7 +134,7 @@ $bitlockerCardClass = if ($bitlockerBad -gt 0) { "card-bad" } elseif ($bitlocker
 # ----------------------------------------------------
 # 2. PUERTOS ABIERTOS EN ESCUCHA - Exposicion de red local
 # ----------------------------------------------------
-Write-Host "[2/5] Auditando puertos en escucha (RDP/SMB/RPC...)" -ForegroundColor Yellow
+Write-Host "[2/10] Auditando puertos en escucha (RDP/SMB/RPC...)" -ForegroundColor Yellow
 $riskPorts = @(3389,445,135,21,22,23,80,443,5985,5986)
 $riskNames = @{ 3389="RDP"; 445="SMB"; 135="RPC"; 21="FTP"; 22="SSH"; 23="Telnet"; 80="HTTP"; 443="HTTPS"; 5985="WinRM-HTTP"; 5986="WinRM-HTTPS" }
 # Puertos que NO deben contarse como 'bad' directo sin contexto de firewall - se marcan 'warn'
@@ -216,7 +216,7 @@ $listenSummary = if ($listenBad -gt 0) { "<span class='badge bad'>$listenBad pue
 # ----------------------------------------------------
 # 3. FIREWALL DE WINDOWS
 # ----------------------------------------------------
-Write-Host "[3/5] Verificando Firewall de Windows..." -ForegroundColor Yellow
+Write-Host "[3/10] Verificando Firewall de Windows..." -ForegroundColor Yellow
 $fwRows = ""
 $fwBad = 0
 try {
@@ -245,7 +245,7 @@ $fwSummary = if ($fwBad -gt 0) { "<span class='badge bad'>$fwBad perfil(es) desa
 # ----------------------------------------------------
 # 4. ANTIVIRUS / DEFENDER
 # ----------------------------------------------------
-Write-Host "[4/5] Verificando Antivirus/Defender..." -ForegroundColor Yellow
+Write-Host "[4/10] Verificando Antivirus/Defender..." -ForegroundColor Yellow
 $avRows = ""
 $avBad = 0
 $avSummary = ""
@@ -310,7 +310,7 @@ try {
 # ----------------------------------------------------
 # 5. CUENTAS ADMINISTRADOR LOCAL - Principio menor privilegio
 # ----------------------------------------------------
-Write-Host "[5/5] Auditando cuentas con privilegios de Administrador local..." -ForegroundColor Yellow
+Write-Host "[5/10] Auditando cuentas con privilegios de Administrador local..." -ForegroundColor Yellow
 $adminRows = ""
 $adminCount = 0
 $adminBad = 0
@@ -362,8 +362,373 @@ try {
 }
 $adminSummary = if ($adminCount -eq 0) { "<span class='badge warn'>Sin datos</span>" } elseif ($adminCount -le 2) { "<span class='badge ok'>$adminCount cuenta(s) admin</span>" } elseif ($adminCount -eq 3) { "<span class='badge warn'>$adminCount cuentas - revisar</span>" } else { "<span class='badge bad'>$adminCount cuentas - exceso de privilegios</span>" }
 
-# Resumen global LOPDP
-$totalBad = $bitlockerBad + $listenBad + $fwBad + $avBad + $adminBad
+# ----------------------------------------------------
+# 6. BLOQUEO DE PANTALLA POR INACTIVIDAD - LOPDP (portatiles contables)
+# ----------------------------------------------------
+Write-Host "[6/10] Verificando bloqueo de pantalla por inactividad..." -ForegroundColor Yellow
+$screenRows = ""
+$screenBad = 0
+$screenWarn = 0
+try {
+    $saveActive = $null; $saveSecure = $null; $saveTimeout = $null; $inactivity = $null
+    try { $saveActive = (Get-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -ErrorAction Stop).ScreenSaveActive } catch {}
+    try { $saveSecure = (Get-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name ScreenSaverIsSecure -ErrorAction Stop).ScreenSaverIsSecure } catch {}
+    try { $saveTimeout = (Get-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name ScreenSaveTimeOut -ErrorAction Stop).ScreenSaveTimeOut } catch {}
+    try { $inactivity = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name InactivityTimeoutSecs -ErrorAction Stop).InactivityTimeoutSecs } catch {}
+    # Tambien GPO: HKCU\Software\Policies\Microsoft\Windows\Control Panel\Desktop
+    try {
+        $gpoActive = (Get-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop" -Name ScreenSaveActive -ErrorAction Stop).ScreenSaveActive
+        if ($null -ne $gpoActive) { $saveActive = $gpoActive }
+        $gpoSecure = (Get-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop" -Name ScreenSaverIsSecure -ErrorAction Stop).ScreenSaverIsSecure
+        if ($null -ne $gpoSecure) { $saveSecure = $gpoSecure }
+        $gpoTimeout = (Get-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop" -Name ScreenSaveTimeOut -ErrorAction Stop).ScreenSaveTimeOut
+        if ($null -ne $gpoTimeout) { $saveTimeout = $gpoTimeout }
+    } catch {}
+    $rows = @()
+    $rows += [PSCustomObject]@{ Item="ScreenSaveActive (protector)"; Valor="$saveActive"; Esperado="1"; Ok=($saveActive -eq "1" -or $saveActive -eq 1) }
+    $rows += [PSCustomObject]@{ Item="ScreenSaverIsSecure (bloqueo)"; Valor="$saveSecure"; Esperado="1"; Ok=($saveSecure -eq "1" -or $saveSecure -eq 1) }
+    $rows += [PSCustomObject]@{ Item="ScreenSaveTimeOut (seg)"; Valor="$saveTimeout"; Esperado="<=900 (15 min)"; Ok=($null -ne $saveTimeout -and [int]$saveTimeout -le 900 -and [int]$saveTimeout -gt 0) }
+    $rows += [PSCustomObject]@{ Item="InactivityTimeoutSecs (GPO)"; Valor="$(if($null -ne $inactivity){$inactivity}else{"No configurado"})"; Esperado="<=900 o No requerido si protector OK"; Ok=($null -eq $inactivity -or [int]$inactivity -le 900) }
+    foreach ($rw in $rows) {
+        $badge = if ($rw.Ok) { "ok" } else { "bad" }
+        $txt = if ($rw.Ok) { "OK" } else { "Revisar" }
+        if (-not $rw.Ok) { if ($rw.Item -like "*Inactivity*") { $screenWarn++ } else { $screenBad++ } }
+        $itemEsc = ConvertTo-HtmlEscaped $rw.Item
+        $valEsc = ConvertTo-HtmlEscaped $rw.Valor
+        $espEsc = ConvertTo-HtmlEscaped $rw.Esperado
+        $screenRows += "<tr><td>$itemEsc</td><td>$valEsc</td><td>$espEsc</td><td><span class='badge $badge'>$txt</span></td></tr>"
+    }
+    if ($screenBad -eq 0 -and $screenWarn -eq 0) { $screenRows += "<tr><td colspan='4' class='text-ok'>Bloqueo por inactividad configurado correctamente.</td></tr>" }
+} catch {
+    $screenRows = "<tr><td colspan='4' class='text-muted'>No se pudo verificar bloqueo de pantalla: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+    $screenWarn = 1
+}
+$screenSummary = if ($screenBad -gt 0) { "<span class='badge bad'>$screenBad fallo(s)</span>" } elseif ($screenWarn -gt 0) { "<span class='badge warn'>$screenWarn aviso(s)</span>" } else { "<span class='badge ok'>OK</span>" }
+
+# ----------------------------------------------------
+# 7. SALUD DE CUENTAS LOCALES - PasswordRequired, Guest, PasswordLastSet
+# ----------------------------------------------------
+Write-Host "[7/10] Verificando salud de cuentas locales..." -ForegroundColor Yellow
+$acctRows = ""
+$acctBad = 0
+$acctWarn = 0
+try {
+    $localUsers = @()
+    if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
+        $localUsers = Get-LocalUser -ErrorAction Stop
+    } else {
+        # Fallback: net user
+        $out = net user 2>&1 | Where-Object { $_ -match "\S" -and $_ -notmatch "comando se completo" -and $_ -notmatch "---" }
+        foreach ($ln in $out) { $localUsers += [PSCustomObject]@{ Name=$ln.Trim(); Enabled=$true; PasswordRequired=$null; PasswordLastSet=$null; Description="" } }
+    }
+    foreach ($u in $localUsers) {
+        $name = if ($u.Name) { $u.Name } else { "$u" }
+        $nameEsc = ConvertTo-HtmlEscaped $name
+        $enabled = $u.Enabled
+        if ($null -eq $enabled) { $enabled = $true }
+        $pwdReq = $u.PasswordRequired
+        $pwdLast = $null
+        try { $pwdLast = $u.PasswordLastSet } catch {}
+        $isGuest = ($name -like "*Guest*" -or $name -like "*Invitado*")
+        $badge = "ok"
+        $note = "OK"
+        if ($isGuest -and $enabled -eq $true) { $badge = "bad"; $note = "Guest habilitado - deshabilitar"; $acctBad++ }
+        elseif ($pwdReq -eq $false) { $badge = "bad"; $note = "Sin contrasena requerida"; $acctBad++ }
+        elseif ($pwdLast -and ((Get-Date) - $pwdLast).TotalDays -gt 90) { $badge = "warn"; $note = "Contrasena >90 dias"; $acctWarn++ }
+        elseif ($enabled -eq $false) { $badge = "warn"; $note = "Deshabilitada"; }
+        else { $badge = "ok"; $note = "OK" }
+        $enText = if ($enabled -eq $true -or $enabled -eq 1) { "Habilitada" } elseif ($enabled -eq $false -or $enabled -eq 0) { "Deshabilitada" } else { "N/D" }
+        $pwdReqText = if ($null -eq $pwdReq) { "N/D" } elseif ($pwdReq) { "Si" } else { "No" }
+        $lastText = if ($pwdLast) { $pwdLast.ToString("yyyy-MM-dd") } else { "N/D" }
+        $acctRows += "<tr><td>$nameEsc</td><td>$enText</td><td>$pwdReqText</td><td>$lastText</td><td><span class='badge $badge'>$note</span></td></tr>"
+    }
+    # net accounts para politica general
+    try {
+        $na = net accounts 2>&1 | Out-String
+        if ($na -match "Duraci.n m.xima de la contrase.a\s+(\d+)" -or $na -match "Maximum password age\s+(\d+)") {
+            $maxAge = [int]$matches[1]
+            if ($maxAge -gt 90 -or $maxAge -eq 2147483647) { $acctRows += "<tr><td colspan='5' class='text-muted'>Politica MaxPasswordAge: $maxAge dias (ilimitado o >90) - revisar GPO.</td></tr>"; $acctWarn++ }
+        }
+    } catch {}
+    if (-not $acctRows) { $acctRows = "<tr><td colspan='5' class='text-muted'>No se detectaron cuentas locales.</td></tr>" }
+} catch {
+    $acctRows = "<tr><td colspan='5' class='text-muted'>No se pudo verificar cuentas: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+    $acctWarn = 1
+}
+$acctSummary = if ($acctBad -gt 0) { "<span class='badge bad'>$acctBad fallo(s)</span>" } elseif ($acctWarn -gt 0) { "<span class='badge warn'>$acctWarn aviso(s)</span>" } else { "<span class='badge ok'>OK</span>" }
+
+# ----------------------------------------------------
+# 8. LAPS / NLA / SMBv1 / COMPARTIDAS
+# ----------------------------------------------------
+Write-Host "[8/10] Verificando LAPS, NLA, SMBv1 y compartidas..." -ForegroundColor Yellow
+$lapsRows = ""; $lapsBad = 0
+$nlaRows = ""; $nlaBad = 0
+$smbRows = ""; $smbBad = 0
+$shareRows = ""; $shareBad = 0
+try {
+    # LAPS clasico y Windows LAPS
+    $lapsClassic = $null; $lapsWin = $null; $lapsBackup = $null
+    try { $lapsClassic = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd" -Name AdmPwdEnabled -ErrorAction Stop).AdmPwdEnabled } catch {}
+    try { $lapsWin = (Get-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\LAPS" -Name BackupDirectory -ErrorAction Stop).BackupDirectory } catch {}
+    try { $lapsBackup = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Policies\LAPS" -Name BackupDirectory -ErrorAction Stop).BackupDirectory } catch {}
+    $lapsEnabled = ($lapsClassic -eq 1 -or $null -ne $lapsWin -or $null -ne $lapsBackup -or (Test-Path "C:\Windows\System32\AdmPwd.dll"))
+    $lapsBadge = if ($lapsEnabled) { "ok" } else { "warn" }
+    $lapsText = if ($lapsEnabled) { "Detectado (AdmPwd/LAPS)" } else { "No detectado - Revisar si aplica LAPS" }
+    if (-not $lapsEnabled) { $lapsBad = 1 }
+    $lapsRows = "<tr><td>LAPS</td><td>$lapsText</td><td><span class='badge $lapsBadge'>$(if($lapsEnabled){"OK"}else{"Revisar"})</span></td></tr>"
+    # Tambien verificar si hay cuentas con LAPS aplicable (solo si domain joined)
+    $isDomain = (Get-CimInstance Win32_ComputerSystem).PartOfDomain
+    if ($isDomain -and -not $lapsEnabled) { $lapsRows += "<tr><td colspan='3' class='text-muted'>Equipo unido a dominio sin LAPS detectado - riesgo de reutilizacion de clave admin local.</td></tr>" }
+} catch {
+    $lapsRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar LAPS: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $nla = $null; $deny = $null
+    try { $nla = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name UserAuthentication -ErrorAction Stop).UserAuthentication } catch {}
+    try { $deny = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -ErrorAction Stop).fDenyTSConnections } catch {}
+    $rdpEnabled = ($deny -eq 0)
+    $nlaOk = ($nla -eq 1)
+    if (-not $rdpEnabled) {
+        $nlaRows = "<tr><td>RDP</td><td>Deshabilitado (fDenyTSConnections=1)</td><td><span class='badge ok'>OK</span></td></tr>"
+    } else {
+        $badge = if ($nlaOk) { "ok" } else { "bad" }
+        $txt = if ($nlaOk) { "NLA requerido (UserAuthentication=1)" } else { "NLA NO requerido - activar" }
+        if (-not $nlaOk) { $nlaBad = 1 }
+        $nlaRows = "<tr><td>RDP NLA</td><td>$txt</td><td><span class='badge $badge'>$(if($nlaOk){"OK"}else{"Revisar"})</span></td></tr>"
+    }
+} catch {
+    $nlaRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar NLA: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $smb1 = $null
+    if (Get-Command Get-SmbServerConfiguration -ErrorAction SilentlyContinue) {
+        $smb1 = (Get-SmbServerConfiguration -ErrorAction Stop).EnableSMB1Protocol
+    } else {
+        try { $smb1 = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name SMB1 -ErrorAction Stop).SMB1 } catch { try { $smb1 = ((Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\mrxsmb10" -Name Start -ErrorAction Stop).Start -ne 4) } catch {} }
+    }
+    $smbOn = ($smb1 -eq $true -or $smb1 -eq 1)
+    $badge = if ($smbOn) { "bad" } else { "ok" }
+    $txt = if ($smbOn) { "Habilitado - deshabilitar (vulnerable WannaCry)" } else { "Deshabilitado" }
+    if ($smbOn) { $smbBad = 1 }
+    $smbRows = "<tr><td>SMBv1</td><td>$txt</td><td><span class='badge $badge'>$(if($smbOn){"Revisar"}else{"OK"})</span></td></tr>"
+} catch {
+    $smbRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar SMBv1: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+        $shares = Get-SmbShare -ErrorAction Stop | Where-Object { $_.Name -notin @("ADMIN$","C$","IPC$","PRINT$") }
+        if ($shares) {
+            foreach ($sh in $shares) {
+                $access = Get-SmbShareAccess -Name $sh.Name -ErrorAction SilentlyContinue
+                $everyone = $access | Where-Object { $_.AccountName -like "*Everyone*" -and $_.AccessRight -eq "Full" }
+                $badge = if ($everyone) { "bad" } else { "ok" }
+                $txt = if ($everyone) { "Everyone Full - Revisar" } else { "OK" }
+                if ($everyone) { $shareBad++ }
+                $shName = ConvertTo-HtmlEscaped $sh.Name
+                $shPath = ConvertTo-HtmlEscaped $sh.Path
+                $shareRows += "<tr><td>$shName</td><td>$shPath</td><td><span class='badge $badge'>$txt</span></td></tr>"
+            }
+        } else {
+            $shareRows = "<tr><td colspan='3' class='text-ok'>Sin compartidas de usuario (solo ADMIN$/C$/IPC$).</td></tr>"
+        }
+    } else {
+        $shareRows = "<tr><td colspan='3' class='text-muted'>Get-SmbShare no disponible.</td></tr>"
+    }
+} catch {
+    $shareRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar compartidas: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+
+# ----------------------------------------------------
+# 9. HERRAMIENTAS REMOTAS + TRAZABILIDAD + EOL
+# ----------------------------------------------------
+Write-Host "[9/10] Verificando herramientas remotas, logs y EOL..." -ForegroundColor Yellow
+$remoteRows = ""; $remoteBad = 0
+$logRows = ""; $logBad = 0
+$eolRows = ""; $eolBad = 0
+try {
+    $remoteChecks = @(
+        @{ Name="AnyDesk"; Paths=@("C:\Program Files\AnyDesk\AnyDesk.exe","C:\Program Files (x86)\AnyDesk\AnyDesk.exe"); Service="AnyDesk" },
+        @{ Name="TeamViewer"; Paths=@("C:\Program Files\TeamViewer\TeamViewer.exe","C:\Program Files (x86)\TeamViewer\TeamViewer_Service.exe"); Service="TeamViewer" },
+        @{ Name="RustDesk"; Paths=@("C:\Program Files\RustDesk\rustdesk.exe","$env:APPDATA\RustDesk\rustdesk.exe"); Service="" },
+        @{ Name="UltraVNC"; Paths=@("C:\Program Files\uvnc bvba\UltraVNC\vncviewer.exe"); Service="uvnc_service" },
+        @{ Name="TightVNC"; Paths=@("C:\Program Files\TightVNC\tvnserver.exe"); Service="tvnserver" },
+        @{ Name="Splashtop"; Paths=@("C:\Program Files (x86)\Splashtop\Splashtop Remote\Server\SRServer.exe"); Service="SplashtopRemoteService" }
+    )
+    $foundRemote = @()
+    foreach ($rc in $remoteChecks) {
+        $foundPath = $null
+        foreach ($pp in $rc.Paths) { if (Test-Path $pp) { $foundPath = $pp; break } }
+        $svcFound = $false
+        if ($rc.Service) { try { $svc = Get-Service -Name $rc.Service -ErrorAction Stop; if ($svc) { $svcFound = $true } } catch {} }
+        if ($foundPath -or $svcFound) {
+            $remoteBad++
+            $val = if ($foundPath) { $foundPath } else { "Servicio $($rc.Service)" }
+            $remoteRows += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $rc.Name)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $val)</td><td><span class='badge warn'>Revisar - autorizacion?</span></td></tr>"
+        }
+    }
+    if (-not $remoteRows) { $remoteRows = "<tr><td colspan='3' class='text-ok'>No se detectaron herramientas remotas tipicas (AnyDesk/TeamViewer/RustDesk...).</td></tr>" }
+} catch {
+    $remoteRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar remoto: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $logInfo = $null
+    try { $logInfo = Get-WinEvent -ListLog Security -ErrorAction Stop } catch {}
+    $maxMB = "N/D"; $ret = "N/D"; $enabled = "N/D"
+    if ($logInfo) {
+        $maxMB = [math]::Round($logInfo.MaximumSizeInBytes/1MB,0)
+        $ret = $logInfo.LogMode
+        $enabled = $logInfo.IsEnabled
+    } else {
+        try { $wev = wevtutil gl Security 2>&1 | Out-String; if ($wev -match "maxSize:\s*(\d+)") { $maxMB = [math]::Round([int]$matches[1]/1MB,0) } } catch {}
+    }
+    $logBadge = if ($maxMB -ne "N/D" -and [int]$maxMB -lt 20) { "warn" } else { "ok" }
+    if ($logBadge -eq "warn") { $logBad = 1 }
+    $maxEsc = ConvertTo-HtmlEscaped "$maxMB MB"
+    $retEsc = ConvertTo-HtmlEscaped "$ret"
+    $logRows += "<tr><td>Security log tamano max</td><td>$maxEsc</td><td><span class='badge $logBadge'>$(if($logBadge -eq 'ok'){'OK'}else{'Pequeno - ampliar a 64MB+'})</span></td></tr>"
+    # W32Time
+    $ntpSource = "N/D"; $ntpSync = "N/D"; $ntpBadge = "warn"
+    try {
+        $w32 = w32tm /query /status 2>&1 | Out-String
+        if ($w32 -match "Source:\s*(.+)") { $ntpSource = $matches[1].Trim() }
+        if ($w32 -match "Last Successful Sync Time:\s*(.+)") { $ntpSync = $matches[1].Trim() }
+        $ntpBadge = if ($ntpSource -match "Local CMOS|No sync" -or $ntpSource -eq "N/D") { "warn" } else { "ok" }
+        if ($ntpBadge -eq "warn") { $logBad++ }
+    } catch {}
+    $logRows += "<tr><td>NTP Fuente</td><td>$(ConvertTo-HtmlEscaped $ntpSource)</td><td><span class='badge $ntpBadge'>$(if($ntpBadge -eq 'ok'){'OK'}else{'Revisar - hora confiable requerida Art.10'})</span></td></tr>"
+    $logRows += "<tr><td>Ultima sync</td><td>$(ConvertTo-HtmlEscaped $ntpSync)</td><td class='text-muted'>Evidencia forense requiere hora sincronizada</td></tr>"
+} catch {
+    $logRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar logs/NTP: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $os = Get-CimInstance Win32_OperatingSystem
+    $caption = $os.Caption
+    $build = $os.BuildNumber
+    $eolNote = "OK"
+    $eolBadge = "ok"
+    # Win10 EOL 14-oct-2025, sin ESU no recibe parches
+    if ($caption -like "*Windows 10*") {
+        $isPastEOL = (Get-Date) -gt (Get-Date "2025-10-14")
+        if ($isPastEOL) {
+            # Verificar ESU: clave HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ESU o ExtendedSecurityUpdates
+            $hasESU = (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ESU") -or (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Servicing" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ESU -ErrorAction SilentlyContinue)
+            if (-not $hasESU) { $eolNote = "Windows 10 sin soporte desde 2025-10-14 - migrar a Win11 o ESU"; $eolBadge = "bad"; $eolBad = 1 }
+            else { $eolNote = "Windows 10 con ESU detectado - verificar vigencia"; $eolBadge = "warn" }
+        } else {
+            $eolNote = "Windows 10 - EOL 2025-10-14 proximo - planificar migracion"
+            $eolBadge = "warn"
+        }
+    } elseif ($caption -like "*Windows 11*") {
+        $eolNote = "Windows 11 vigente"; $eolBadge = "ok"
+    } else {
+        $eolNote = "SO no Windows 10/11 - verificar ciclo de vida"; $eolBadge = "warn"
+    }
+    $capEsc = ConvertTo-HtmlEscaped $caption
+    $buildEsc = ConvertTo-HtmlEscaped "$build"
+    $eolRows = "<tr><td>$capEsc</td><td>$buildEsc</td><td><span class='badge $eolBadge'>$eolNote</span></td></tr>"
+} catch {
+    $eolRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar EOL: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+
+# ----------------------------------------------------
+# 10. DEFENDER AVANZADO + BITLOCKER RECOVERY + SECUREBOOT/TPM
+# ----------------------------------------------------
+Write-Host "[10/10] Verificando Defender avanzado, BitLocker recovery y SecureBoot..." -ForegroundColor Yellow
+$defAdvRows = ""; $defAdvBad = 0
+$recRows = ""; $recBad = 0
+$secRows = ""; $secBad = 0
+try {
+    if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) {
+        $pref = Get-MpPreference -ErrorAction Stop
+        $checks = @(
+            @{ Label="Tamper Protection (IsTamperProtected)"; Value=(try{(Get-MpComputerStatus).IsTamperProtected}catch{$null}); Ok={ param($v) $v -eq $true } },
+            @{ Label="Controlled Folder Access"; Value=$pref.EnableControlledFolderAccess; Ok={ param($v) $v -eq 1 } },
+            @{ Label="Network Protection"; Value=$pref.EnableNetworkProtection; Ok={ param($v) $v -eq 1 } }
+        )
+        foreach ($chk in $checks) {
+            $val = $chk.Value
+            $ok = & $chk.Ok $val
+            $badge = if ($ok) { "ok" } else { "warn" }
+            $txt = if ($ok) { "OK" } else { "Revisar" }
+            if (-not $ok) { $defAdvBad++ }
+            $defAdvRows += "<tr><td>$(ConvertTo-HtmlEscaped $chk.Label)</td><td>$(ConvertTo-HtmlEscaped "$val")</td><td><span class='badge $badge'>$txt</span></td></tr>"
+        }
+        # ASR rules
+        $asrIds = $pref.AttackSurfaceReductionRules_Ids
+        $asrActs = $pref.AttackSurfaceReductionRules_Actions
+        if ($asrIds -and $asrIds.Count -gt 0) {
+            $active = 0
+            for ($i=0; $i -lt $asrIds.Count; $i++) { if ($asrActs[$i] -eq 1) { $active++ } }
+            $defAdvRows += "<tr><td>ASR Rules activas</td><td>$active de $($asrIds.Count)</td><td><span class='badge ok'>$active activas</span></td></tr>"
+        } else {
+            $defAdvRows += "<tr><td>ASR Rules</td><td>0</td><td><span class='badge warn'>Sin ASR - considerar GPO</span></td></tr>"; $defAdvBad++
+        }
+        # Threat detections recientes
+        try {
+            $threats = Get-MpThreatDetection -ErrorAction Stop | Select-Object -First 5
+            if ($threats) {
+                foreach ($th in $threats) {
+                    $cat = ConvertTo-HtmlEscaped $th.ThreatID
+                    $res = ConvertTo-HtmlEscaped "$($th.Resources)"
+                    $defAdvRows += "<tr class='row-bad'><td>ThreatDetection</td><td>$cat - $res</td><td><span class='badge bad'>Incidente previo</span></td></tr>"
+                    $defAdvBad++
+                }
+            } else {
+                $defAdvRows += "<tr><td>ThreatDetection</td><td>Sin detecciones recientes</td><td><span class='badge ok'>OK</span></td></tr>"
+            }
+        } catch {}
+    } else {
+        $defAdvRows = "<tr><td colspan='3' class='text-muted'>Get-MpPreference no disponible.</td></tr>"
+    }
+} catch {
+    $defAdvRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar Defender avanzado: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    # BitLocker Recovery: verificar que C: tenga RecoveryPassword protector y XTS-AES-256
+    $recVols = @()
+    if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) { $recVols = Get-BitLockerVolume -ErrorAction SilentlyContinue | Where-Object { $_.MountPoint -eq "C:" } }
+    if ($recVols -and $recVols.Count -gt 0) {
+        foreach ($rv in $recVols) {
+            $hasRecovery = $false
+            try { $hasRecovery = ($rv.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }).Count -gt 0 } catch {}
+            $encMethod = $rv.EncryptionMethod
+            # 3=AES128, 6=XTS-AES128, 7=XTS-AES256
+            $methodTxt = "$encMethod"
+            $methodBadge = if ($encMethod -eq 7) { "ok" } elseif ($encMethod -in @(3,6)) { "warn" } else { "warn" }
+            $recBadge = if ($hasRecovery) { "ok" } else { "bad" }
+            if (-not $hasRecovery) { $recBad++ }
+            $recRows += "<tr><td>C: RecoveryPassword</td><td>$(if($hasRecovery){"Presente"}else{"AUSENTE - riesgo perdida datos"})</td><td><span class='badge $recBadge'>$(if($hasRecovery){"OK"}else{"Revisar"})</span></td></tr>"
+            $recRows += "<tr><td>C: Metodo</td><td>$methodTxt (7=XTS-AES-256 recomendado)</td><td><span class='badge $methodBadge'>$(if($encMethod -eq 7){"OK"}else{"Revisar"})</span></td></tr>"
+        }
+    } else {
+        $recRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar Recovery (Get-BitLockerVolume no disponible o sin Admin).</td></tr>"
+    }
+} catch {
+    $recRows = "<tr><td colspan='3' class='text-muted'>Error Recovery check: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $secChecks = @()
+    # SecureBoot
+    $sb = $null; $sbOk = $false
+    try { $sb = Confirm-SecureBootUEFI -ErrorAction Stop; $sbOk = $sb } catch { $sb = "No soportado/BIOS Legacy ($($_.Exception.Message))" }
+    $sbBadge = if ($sbOk -eq $true) { "ok" } else { "warn" }
+    if ($sbOk -ne $true) { $secBad++ }
+    $secChecks += "<tr><td>SecureBoot</td><td>$(ConvertTo-HtmlEscaped "$sb")</td><td><span class='badge $sbBadge'>$(if($sbOk -eq $true){"OK"}else{"Revisar"})</span></td></tr>"
+    # TPM
+    $tpmPresent = "N/D"; $tpmBadge = "warn"
+    try { $tpm = Get-Tpm -ErrorAction Stop; $tpmPresent = "Present=$($tpm.TpmPresent) Ready=$($tpm.TpmReady) Enabled=$($tpm.TpmEnabled)"; $tpmBadge = if ($tpm.TpmReady) { "ok" } else { "warn" }; if (-not $tpm.TpmReady) { $secBad++ } } catch { $tpmPresent = "No disponible: $($_.Exception.Message)" }
+    $secChecks += "<tr><td>TPM</td><td>$(ConvertTo-HtmlEscaped $tpmPresent)</td><td><span class='badge $tpmBadge'>$(if($tpmBadge -eq 'ok'){'OK'}else{'Revisar'})</span></td></tr>"
+    # VBS / DeviceGuard
+    try { $dg = Get-CimInstance Win32_DeviceGuard -ErrorAction Stop -Namespace root\Microsoft\Windows\DeviceGuard; $vbs = $dg.VirtualizationBasedSecurityStatus; $vbsBadge = if ($vbs -eq 2) { "ok" } else { "warn" }; if ($vbs -ne 2) { $secBad++ }; $secChecks += "<tr><td>VBS</td><td>Status=$vbs (2=Running)</td><td><span class='badge $vbsBadge'>$(if($vbs -eq 2){'OK'}else{'Revisar'})</span></td></tr>" } catch {}
+    $secRows = ($secChecks -join "")
+    if (-not $secRows) { $secRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar SecureBoot/TPM/VBS.</td></tr>" }
+} catch {
+    $secRows = "<tr><td colspan='3' class='text-muted'>Error SecureBoot/TPM: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+
+# Resumen global LOPDP (ahora con controles extendidos)
+$extraBad = $screenBad + $acctBad + $lapsBad + $nlaBad + $smbBad + $shareBad + $remoteBad + $logBad + $eolBad + $defAdvBad + $recBad + $secBad
+$totalBad = $bitlockerBad + $listenBad + $fwBad + $avBad + $adminBad + $extraBad
 $globalBadge = if ($totalBad -eq 0) { "ok" } elseif ($totalBad -le 2) { "warn" } else { "bad" }
 $globalText = if ($totalBad -eq 0) { "Cumple controles basicos LOPDP" } elseif ($totalBad -le 2) { "$totalBad hallazgo(s) - correccion recomendada" } else { "$totalBad hallazgos criticos - accion inmediata" }
 
@@ -485,6 +850,62 @@ $htmlContent = @"
             <tbody>$adminRows</tbody>
         </table>
         <div class="mitig"><strong>Mitigacion:</strong> <code>Remove-LocalGroupMember -Group Administradores -Member "dominio\usuario"</code> + GPO Restricted Groups / LAPS. Ideal: max 2 admins locales.</div>
+    </div>
+
+    <!-- 6. Bloqueo pantalla -->
+    <div class="card">
+        <h3>6. Bloqueo de pantalla por inactividad $screenSummary</h3>
+        <p class="text-muted" style="font-size:12px;">Riesgo: portatil contable sin bloqueo = acceso fisico a datos si se deja desatendido. LOPDP exige bloqueo automatico.</p>
+        <table>
+            <thead><tr><th>Item</th><th>Valor</th><th>Esperado</th><th>Estado</th></tr></thead>
+            <tbody>$screenRows</tbody>
+        </table>
+        <div class="mitig"><strong>Mitigacion:</strong> GPO <code>ScreenSaveTimeOut 600</code> + <code>ScreenSaverIsSecure 1</code> + <code>InactivityTimeoutSecs 600</code></div>
+    </div>
+
+    <!-- 7. Salud cuentas -->
+    <div class="card">
+        <h3>7. Salud de cuentas locales $acctSummary</h3>
+        <p class="text-muted" style="font-size:12px;">Contrasena vacia, Guest habilitado o contrasenas >90 dias = incumplimiento.</p>
+        <table>
+            <thead><tr><th>Cuenta</th><th>Estado</th><th>Pwd Requerida</th><th>Ultimo cambio</th><th>Evaluacion</th></tr></thead>
+            <tbody>$acctRows</tbody>
+        </table>
+    </div>
+
+    <!-- 8. LAPS / NLA / SMBv1 / Shares -->
+    <div class="card">
+        <h3>8. LAPS / NLA / SMBv1 / Compartidas</h3>
+        <h4>LAPS</h4>
+        <table><thead><tr><th>Control</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$lapsRows</tbody></table>
+        <h4>RDP NLA</h4>
+        <table><thead><tr><th>Control</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$nlaRows</tbody></table>
+        <h4>SMBv1</h4>
+        <table><thead><tr><th>Control</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$smbRows</tbody></table>
+        <h4>Compartidas con Everyone Full</h4>
+        <table><thead><tr><th>Share</th><th>Ruta</th><th>Estado</th></tr></thead><tbody>$shareRows</tbody></table>
+    </div>
+
+    <!-- 9. Remote tools / Logs / EOL -->
+    <div class="card">
+        <h3>9. Herramientas remotas / Trazabilidad / EOL</h3>
+        <h4>Herramientas de acceso remoto</h4>
+        <table><thead><tr><th>Tool</th><th>Evidencia</th><th>Estado</th></tr></thead><tbody>$remoteRows</tbody></table>
+        <h4>Retencion de log Security + NTP</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$logRows</tbody></table>
+        <h4>Fin de soporte (EOL)</h4>
+        <table><thead><tr><th>SO</th><th>Build</th><th>Estado</th></tr></thead><tbody>$eolRows</tbody></table>
+    </div>
+
+    <!-- 10. Defender avanzado / Recovery / SecureBoot -->
+    <div class="card">
+        <h3>10. Defender avanzado / BitLocker Recovery / SecureBoot+TPM</h3>
+        <h4>Defender CFA / ASR / Threats</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$defAdvRows</tbody></table>
+        <h4>BitLocker Recovery (C:)</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$recRows</tbody></table>
+        <h4>SecureBoot / TPM / VBS</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$secRows</tbody></table>
     </div>
 
     <div class="footer">

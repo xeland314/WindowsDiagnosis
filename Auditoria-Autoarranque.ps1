@@ -199,20 +199,48 @@ $iocHits = $auditResults | Where-Object { $_.IOCMatch }
 $mismatchHits = $auditResults | Where-Object { $_.Mismatch -and $_.Mismatch.Mismatch }
 
 # ----------------------------------------------------
-# 3. THROTTLING DE CPU
+# 3. THROTTLING DE CPU - metrica fiable (no CurrentClockSpeed)
 # ----------------------------------------------------
 Write-Host "[3/10] Verificando frecuencia de CPU (throttling)..." -ForegroundColor Yellow
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $maxClock = $cpu.MaxClockSpeed
 $curClock = $cpu.CurrentClockSpeed
 $clockPct = if ($maxClock -gt 0) { [math]::Round(($curClock / $maxClock) * 100, 1) } else { $null }
-$throttleWarning = ($clockPct -ne $null -and $clockPct -lt 60)
+# Metrica fiable: % Processor Performance (locale-independiente via WMI perf), evita falsos positivos por power plan "eficiencia"
+$perfPct = $null
+try {
+    $perf = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction Stop
+    if ($perf -and $null -ne $perf.PercentProcessorPerformance) { $perfPct = [math]::Round($perf.PercentProcessorPerformance,1) }
+} catch {}
+if ($null -eq $perfPct) {
+    try {
+        $perf2 = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop
+        if ($perf2 -and $null -ne $perf2.PercentProcessorTime) { $perfPct = [math]::Round($perf2.PercentProcessorTime,1) }
+    } catch {}
+}
+# Fallback a LoadPercentage si disponible
+$loadPct = ($cpu.LoadPercentage)
+# Decidir throttling: usa perfPct si existe, sino clockPct
+$throttleMetric = if ($null -ne $perfPct) { $perfPct } else { $clockPct }
+$throttleWarning = ($throttleMetric -ne $null -and $throttleMetric -lt 60)
+$clockNotePerf = if ($null -ne $perfPct) { " (Perf: $perfPct% via ProcessorInformation)" } else { "" }
 
 # ----------------------------------------------------
-# 4. PROCESOS TOP CPU
+# 4. PROCESOS TOP CPU - muestreo delta 1.2s (no segundos acumulados)
 # ----------------------------------------------------
-Write-Host "[4/10] Foto de procesos con mayor CPU..." -ForegroundColor Yellow
-$topProcs = Get-Process | Sort-Object CPU -Descending | Select-Object -First 10 Name, Id, CPU, @{N="RAM_MB";E={[math]::Round($_.WorkingSet/1MB,1)}}, Path
+Write-Host "[4/10] Foto de procesos con mayor CPU (muestreo delta 1.2s)..." -ForegroundColor Yellow
+$procSample1 = @{}
+try {
+    Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $procSample1[$_.Id] = $_.CPU }
+} catch {}
+Start-Sleep -Milliseconds 1200
+$topProcs = Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+    $before = $procSample1[$_.Id]
+    $delta = if ($null -ne $before -and $null -ne $_.CPU) { [math]::Round($_.CPU - $before,2) } else { 0 }
+    # Si no hubo delta (proceso nuevo), usar 0; normalizar a % aprox: delta / interval
+    $pctApprox = [math]::Round($delta / 1.2,1) # aprox % de un core
+    [PSCustomObject]@{ Name=$_.Name; Id=$_.Id; CPU=$delta; CPU_Pct=$pctApprox; RAM_MB=[math]::Round($_.WorkingSet/1MB,1); Path=$_.Path }
+} | Sort-Object CPU -Descending | Select-Object -First 10
 
 # ----------------------------------------------------
 # 5. WMI SUBSCRIPTIONS (T1546.003) - Persistencia sin archivo
@@ -569,7 +597,10 @@ $procRowsHtml = ""
 foreach ($p in $topProcs) {
     $pPath = if ($p.Path) { ConvertTo-HtmlEscaped $p.Path } else { "(sin ruta accesible)" }
     $pName = ConvertTo-HtmlEscaped $p.Name
-    $procRowsHtml += "<tr><td>$pName</td><td>$($p.Id)</td><td>$([math]::Round($p.CPU,1))</td><td>$($p.RAM_MB) MB</td><td style='word-break:break-all;'>$pPath</td></tr>"
+    $delta = [math]::Round($p.CPU,2)
+    $pct = if ($null -ne $p.CPU_Pct) { "$($p.CPU_Pct)% (1.2s)" } else { "$delta s" }
+    $badge = if ($p.CPU -gt 1) { "warn" } elseif ($p.CPU -gt 5) { "bad" } else { "ok" }
+    $procRowsHtml += "<tr><td>$pName</td><td>$($p.Id)</td><td><span class='badge $badge'>$pct</span> ($delta s delta)</td><td>$($p.RAM_MB) MB</td><td style='word-break:break-all;'>$pPath</td></tr>"
 }
 
 $iocSummaryHtml = if ($iocHits.Count -gt 0) {
@@ -586,9 +617,9 @@ $mismatchSummary = if ($mismatchHits.Count -gt 0) {
 
 $clockBadge = if ($throttleWarning) { "bad" } else { "ok" }
 $clockNote = if ($throttleWarning) {
-    "La CPU esta operando muy por debajo de su frecuencia base. Patron compatible con throttling termico por carga sostenida en segundo plano."
+    "La CPU esta operando muy por debajo de su frecuencia base$clockNotePerf. Patron compatible con throttling termico por carga sostenida en segundo plano."
 } else {
-    "La CPU opera dentro de un rango normal respecto a su frecuencia base."
+    "La CPU opera dentro de un rango normal respecto a su frecuencia base$clockNotePerf."
 }
 
 $computerEsc = ConvertTo-HtmlEscaped $ComputerName
@@ -660,9 +691,9 @@ $htmlContent = @"
     $iocSummaryHtml
 
     <div class="card">
-        <h3>Frecuencia de CPU (Throttling)</h3>
+        <h3>Frecuencia de CPU (Throttling) <span class="badge $clockBadge">$throttleMetric %</span></h3>
         <p>Modelo: $cpuNameEsc</p>
-        <p>Frecuencia base: $maxClock MHz | Frecuencia actual: $curClock MHz | <span class="badge $clockBadge">$clockPct %</span></p>
+        <p>Frecuencia base: $maxClock MHz | Frecuencia actual: $curClock MHz ($clockPct %) | Perf: $(if($null -ne $perfPct){"$perfPct %"}else{"N/D"})</p>
         <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">$clockNote</p>
     </div>
 
@@ -725,10 +756,11 @@ $htmlContent = @"
     </div>
 
     <div class="card">
-        <h3>Top 10 Procesos por Consumo de CPU (foto actual)</h3>
+        <h3>Top 10 Procesos por Consumo de CPU (delta 1.2s - uso real)</h3>
+        <p class="text-muted" style="font-size:12px; margin-bottom:8px;">Antes se ordenaba por segundos acumulados (el navegador de 3 dias tapaba al minero). Ahora se muestrea con 2 snapshots y delta - evita falsos negativos.</p>
         <table>
             <thead>
-                <tr><th>Proceso</th><th>PID</th><th>CPU (s acumulados)</th><th>RAM</th><th>Ruta</th></tr>
+                <tr><th>Proceso</th><th>PID</th><th>CPU delta</th><th>RAM</th><th>Ruta</th></tr>
             </thead>
             <tbody>
                 $procRowsHtml
