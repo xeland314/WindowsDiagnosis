@@ -1,9 +1,6 @@
 import pathlib
-
 dst = pathlib.Path(r"C:\Users\ASUS\workspace\WindowsDiagnosis\Diagnostico-PC-HTML.ps1")
-
-# Full new content without tildes and with point 2 implemented (sections 6-11)
-new_content = r"""<#
+content = r"""<#
 .SYNOPSIS
     Script de Diagnostico Integral para Windows con Reporte HTML.
 .DESCRIPTION
@@ -784,5 +781,5 @@ Write-Host "==================================================" -ForegroundColor
 # Abrir reporte en el navegador predeterminado
 Start-Process $OutputFile
 """
-dst.write_text(new_content, encoding='utf-8')
-print(f"Wrote {len(new_content.splitlines())} lines, non-ascii: {[c for c in new_content if ord(c)>127][:20]}")
+dst.write_text(content, encoding="utf-8")
+print("Wrote", len(content.splitlines()), "lines")

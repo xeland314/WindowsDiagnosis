@@ -1,6 +1,5 @@
 import pathlib
 dst = pathlib.Path(r"C:\Users\ASUS\workspace\WindowsDiagnosis\Auditoria-Autoarranque.ps1")
-
 content = r"""<#
 .SYNOPSIS
     Auditoria de programas de autoarranque - deteccion de Masquerading (T1036) y
@@ -505,10 +504,10 @@ function Get-BadgeForRow($result) {
     return "ok"
 }
 
-$auditRowsHtml = ""
+$auditCardsHtml = ""
 foreach ($r in ($auditResults | Sort-Object { (Get-BadgeForRow $_) -eq "ok" })) {
     $badge = Get-BadgeForRow $r
-    $rowClass = if ($badge -eq "bad") { "row-bad" } else { "" }
+    $cardClass = if ($badge -eq "bad") { "card-bad" } elseif ($badge -eq "warn") { "card-warn" } else { "" }
     $status = if ($r.IOCMatch) {
         "<span class='badge bad'>IOC CONOCIDO</span>"
     } elseif (-not $r.Exists) {
@@ -532,10 +531,40 @@ foreach ($r in ($auditResults | Sort-Object { (Get-BadgeForRow $_) -eq "ok" })) 
     $nameEsc = ConvertTo-HtmlEscaped $r.Name
     $pathEsc = ConvertTo-HtmlEscaped $r.Path
     $signEsc = ConvertTo-HtmlEscaped $r.SignStatus
-    $auditRowsHtml += "<tr class='$rowClass'><td>$srcEsc</td><td>$nameEsc</td><td style='word-break:break-all;'>$pathEsc</td><td>$companyDisplay</td><td>$signEsc</td><td>$status</td><td>$detail</td></tr>"
+    $signerEsc = ConvertTo-HtmlEscaped $r.Signer
+    $hashEsc = ConvertTo-HtmlEscaped $r.Hash
+    # Resumen corto para el summary: nombre + path (trunc visual via CSS) + status
+    $auditCardsHtml += @"
+<details class="audit-card $cardClass">
+    <summary>
+        <span class="audit-summary-left">
+            <strong>$nameEsc</strong>
+            <span class="audit-path">$pathEsc</span>
+        </span>
+        <span class="audit-summary-right">$status</span>
+    </summary>
+    <div class="audit-details">
+        <div class="audit-grid">
+            <div><span class="label">Origen</span><span class="value">$srcEsc</span></div>
+            <div><span class="label">Fabricante</span><span class="value">$companyDisplay</span></div>
+            <div><span class="label">Firma</span><span class="value">$signEsc</span></div>
+            <div><span class="label">Firmante</span><span class="value" style="word-break:break-all;">$signerEsc</span></div>
+        </div>
+        <div style="margin-top:8px;">
+            <span class="label">Ruta completa</span>
+            <code style="word-break:break-all; display:block; margin-top:4px;">$pathEsc</code>
+        </div>
+        <div style="margin-top:8px;">
+            <span class="label">SHA256</span>
+            <code style="word-break:break-all; display:block; margin-top:4px;">$hashEsc</code>
+        </div>
+        <div class="audit-detail-box">$detail</div>
+    </div>
+</details>
+"@
 }
-if (-not $auditRowsHtml) {
-    $auditRowsHtml = "<tr><td colspan='7' class='text-muted'>No se encontraron entradas de autoarranque.</td></tr>"
+if (-not $auditCardsHtml) {
+    $auditCardsHtml = "<p class='text-muted'>No se encontraron entradas de autoarranque.</p>"
 }
 
 $procRowsHtml = ""
@@ -600,9 +629,25 @@ $htmlContent = @"
         .badge.warn { background: rgba(234, 179, 8, 0.2); color: var(--warn-color); border: 1px solid var(--warn-color); }
         .badge.bad { background: rgba(239, 68, 68, 0.2); color: var(--bad-color); border: 1px solid var(--bad-color); }
         .text-muted { color: var(--text-muted); }
-        .text-ok { color: var(--ok-color); }
         .footer { text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 30px; }
         code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+        /* Cards details para autoarranque - rutas largas */
+        .audit-card { background: rgba(15,23,42,0.6); border: 1px solid var(--card-border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+        .audit-card.card-bad { border-color: rgba(239,68,68,0.5); background: rgba(239,68,68,0.08); }
+        .audit-card.card-warn { border-color: rgba(234,179,8,0.4); }
+        .audit-card summary { list-style: none; display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; cursor: pointer; gap: 12px; }
+        .audit-card summary::-webkit-details-marker { display: none; }
+        .audit-card summary::before { content: ">"; color: var(--text-muted); margin-right: 6px; transition: transform 0.2s; }
+        .audit-card[open] summary::before { transform: rotate(90deg); }
+        .audit-summary-left { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+        .audit-summary-left strong { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .audit-path { font-size: 11px; color: var(--text-muted); word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .audit-summary-right { flex-shrink: 0; }
+        .audit-details { padding: 12px 14px; border-top: 1px solid var(--card-border); background: rgba(15,23,42,0.4); }
+        .audit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .audit-grid .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); display: block; }
+        .audit-grid .value { font-size: 13px; word-break: break-all; }
+        .audit-detail-box { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); font-size: 12px; }
     </style>
 </head>
 <body>
@@ -625,17 +670,10 @@ $htmlContent = @"
 
     <div class="card">
         <h3>Programas en Autoarranque - Fabricante vs. Carpeta ($mismatchSummary)</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Origen</th><th>Nombre</th><th>Ruta</th><th>Fabricante</th>
-                    <th>Firma</th><th>Estado</th><th>Detalle</th>
-                </tr>
-            </thead>
-            <tbody>
-                $auditRowsHtml
-            </tbody>
-        </table>
+        <p class="text-muted" style="font-size:12px; margin-bottom:10px;">Click en cada entrada para ver ruta completa, hash y firmante. Las rutas largas ya no rompen la tabla: se muestran como cards plegables (&lt;details&gt;).</p>
+        <div class="audit-list">
+            $auditCardsHtml
+        </div>
     </div>
 
     <!-- 5. WMI -->
@@ -720,6 +758,7 @@ Write-Host "`n==================================================" -ForegroundCol
 Write-Host " Reporte generado en: $OutputFile" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Green
 Start-Process $OutputFile
+
 """
-dst.write_text(content, encoding='utf-8')
-print(f"Wrote {len(content.splitlines())} lines, non-ascii: {[c for c in content if ord(c)>127][:10]}")
+dst.write_text(content, encoding="utf-8")
+print("Wrote", len(content.splitlines()), "lines")

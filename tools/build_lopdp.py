@@ -1,6 +1,5 @@
 import pathlib
 dst = pathlib.Path(r"C:\Users\ASUS\workspace\WindowsDiagnosis\Auditoria-LOPDP-Endpoint.ps1")
-
 content = r"""<#
 .SYNOPSIS
     Auditoria de seguridad de endpoint - Cumplimiento LOPDP Art.10 y 38 (Ecuador).
@@ -140,19 +139,31 @@ $bitlockerCardClass = if ($bitlockerBad -gt 0) { "card-bad" } elseif ($bitlocker
 Write-Host "[2/5] Auditando puertos en escucha (RDP/SMB/RPC...)" -ForegroundColor Yellow
 $riskPorts = @(3389,445,135,21,22,23,80,443,5985,5986)
 $riskNames = @{ 3389="RDP"; 445="SMB"; 135="RPC"; 21="FTP"; 22="SSH"; 23="Telnet"; 80="HTTP"; 443="HTTPS"; 5985="WinRM-HTTP"; 5986="WinRM-HTTPS" }
+# Puertos que NO deben contarse como 'bad' directo sin contexto de firewall - se marcan 'warn'
+$portsFirewallSensitive = @(445,135)
+$portsWarnOnly = @(80,443,5985,5986)
 $listenRows = ""
 $listenBad = 0
+$listenWarn = 0
+# Necesitamos estado del firewall antes para cruzar exposicion: si firewall bloquea entrante, el riesgo es menor
+$fwProfilesForPorts = $null
+$fwBlockingAll = $false
+try {
+    $fwProfilesForPorts = Get-NetFirewallProfile -ErrorAction Stop
+    $fwBlockingAll = $true
+    foreach ($fp in $fwProfilesForPorts) {
+        $isOn = ($fp.Enabled -eq $true -or $fp.Enabled -eq 1 -or $fp.Enabled -eq "True")
+        $inBlock = ($fp.DefaultInboundAction -eq "Block" -or $fp.DefaultInboundAction -eq 1)
+        if (-not $isOn -or -not $inBlock) { $fwBlockingAll = $false }
+    }
+} catch { $fwBlockingAll = $false }
 try {
     $listens = Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { ($_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress -eq '::' -or $_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress.StartsWith("0.")) -and ($riskPorts -contains $_.LocalPort) }
-    # Nota: en algunos builds LocalAddress viene como 0.0.0.0 o ::, filtramos por puerto
-    # Si el filtro anterior deja todo vacio por formato, reintentar solo por puerto + Listen
     if (-not $listens -or $listens.Count -eq 0) {
         $listens = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $riskPorts -contains $_.LocalPort }
-        # Filtrar solo los que escuchan en todas las interfaces
         $listens = $listens | Where-Object { $_.LocalAddress -eq '0.0.0.0' -or $_.LocalAddress -eq '::' -or $_.LocalAddress -eq '0.0.0.0' }
     }
     if ($listens -and $listens.Count -gt 0) {
-        $listenBad = $listens.Count
         foreach ($ln in $listens) {
             $port = $ln.LocalPort
             $svc = if ($riskNames.ContainsKey($port)) { $riskNames[$port] } else { "Servicio $port" }
@@ -161,13 +172,27 @@ try {
             try { $proc = (Get-Process -Id $ln.OwningProcess -ErrorAction Stop).ProcessName } catch { $proc = "PID $($ln.OwningProcess)" }
             $procEsc = ConvertTo-HtmlEscaped $proc
             $svcEsc = ConvertTo-HtmlEscaped $svc
-            $listenRows += "<tr class='row-bad'><td>$addr</td><td><span class='badge bad'>$port</span> $svcEsc</td><td>$procEsc ($($ln.OwningProcess))</td><td>Expuesto a toda la red local - Cerrar o restringir por Firewall/VPN</td></tr>"
+            # Clasificacion: 5985/5986 y 80/443 siempre warn, 445/135 con firewall bloqueando = warn, resto bad
+            $isWarnOnly = ($portsWarnOnly -contains $port)
+            $isFirewallSensitive = ($portsFirewallSensitive -contains $port)
+            if ($isWarnOnly) {
+                $listenWarn++
+                $listenRows += "<tr class='row-bad' style='opacity:0.9'><td>$addr</td><td><span class='badge warn'>$port</span> $svcEsc</td><td>$procEsc ($($ln.OwningProcess))</td><td>Escucha en 0.0.0.0 - Normal si hay PSRemoting/GPO (5985/5986) o web local (80/443). Verificar regla Firewall.</td></tr>"
+            } elseif ($isFirewallSensitive -and $fwBlockingAll) {
+                $listenWarn++
+                $listenRows += "<tr><td>$addr</td><td><span class='badge warn'>$port</span> $svcEsc</td><td>$procEsc ($($ln.OwningProcess))</td><td>Escucha en 0.0.0.0 pero Firewall bloquea entrante por defecto (DefaultInboundAction Block) - Exposicion mitigada. Revisar regla si es necesario compartir.</td></tr>"
+            } else {
+                $listenBad++
+                $listenRows += "<tr class='row-bad'><td>$addr</td><td><span class='badge bad'>$port</span> $svcEsc</td><td>$procEsc ($($ln.OwningProcess))</td><td>Expuesto a toda la red local - Cerrar o restringir por Firewall/VPN</td></tr>"
+            }
+        }
+        if ($listenBad -eq 0 -and $listenWarn -eq 0) {
+            $listenRows = "<tr><td colspan='4' class='text-ok'>Ningun puerto critico (3389/445/135...) expuesto en 0.0.0.0/:: (correcto).</td></tr>"
         }
     } else {
         $listenRows = "<tr><td colspan='4' class='text-ok'>Ningun puerto critico (3389/445/135...) expuesto en 0.0.0.0/:: (correcto).</td></tr>"
     }
 } catch {
-    # Fallback netstat para sistemas sin Get-NetTCPConnection
     try {
         $ns = netstat -ano 2>&1 | Select-String "LISTENING"
         $found = @()
@@ -177,9 +202,9 @@ try {
             }
         }
         if ($found.Count -gt 0) {
-            $listenBad = $found.Count
+            $listenWarn = $found.Count
             foreach ($f in ($found | Select-Object -First 20)) {
-                $listenRows += "<tr class='row-bad'><td colspan='4'>$(ConvertTo-HtmlEscaped $f) <span class='badge bad'>Revisar</span></td></tr>"
+                $listenRows += "<tr class='row-bad'><td colspan='4'>$(ConvertTo-HtmlEscaped $f) <span class='badge warn'>Revisar + Firewall</span></td></tr>"
             }
         } else {
             $listenRows = "<tr><td colspan='4' class='text-ok'>netstat no reporta puertos criticos en escucha.</td></tr>"
@@ -188,7 +213,7 @@ try {
         $listenRows = "<tr><td colspan='4' class='text-muted'>No se pudo auditar puertos: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
     }
 }
-$listenSummary = if ($listenBad -gt 0) { "<span class='badge bad'>$listenBad puerto(s) expuesto(s)</span>" } else { "<span class='badge ok'>Sin exposicion critica</span>" }
+$listenSummary = if ($listenBad -gt 0) { "<span class='badge bad'>$listenBad puerto(s) critico(s)</span> $(if($listenWarn -gt 0){"<span class='badge warn'>$listenWarn en modo warn (Firewall/PSRemoting)</span>"})" } elseif ($listenWarn -gt 0) { "<span class='badge warn'>$listenWarn puerto(s) en escucha (mitigado por Firewall/PSRemoting)</span>" } else { "<span class='badge ok'>Sin exposicion critica</span>" }
 
 # ----------------------------------------------------
 # 3. FIREWALL DE WINDOWS
@@ -294,19 +319,28 @@ $adminBad = 0
 try {
     # SID S-1-5-32-544 = Administradores, independiente de idioma (Administrators/Administradores)
     $members = Get-LocalGroupMember -SID "S-1-5-32-544" -ErrorAction Stop
-    $adminCount = $members.Count
-    foreach ($m in $members) {
+    # Filtra solo Principals locales para no penalizar Domain Admins en equipo unido a dominio
+    $localMembers = $members | Where-Object { $_.PrincipalSource -eq "Local" }
+    $domainMembers = $members | Where-Object { $_.PrincipalSource -ne "Local" }
+    $adminCount = $localMembers.Count
+    if ($adminCount -eq 0) { $adminCount = $members.Count } # fallback si PrincipalSource vacio en build antigua
+    $allForDisplay = @()
+    if ($localMembers) { $allForDisplay += $localMembers }
+    if ($domainMembers) { $allForDisplay += $domainMembers }
+    if (-not $allForDisplay -or $allForDisplay.Count -eq 0) { $allForDisplay = $members }
+    foreach ($m in $allForDisplay) {
         $name = ConvertTo-HtmlEscaped $m.Name
         $src = ConvertTo-HtmlEscaped $m.PrincipalSource
         $objClass = ConvertTo-HtmlEscaped $m.ObjectClass
-        # Heuristica: si es usuario local y no es Administrator/Administrateur, puede ser exceso de privilegios
-        $isBuiltIn = ($name -like "*Administrator*" -or $name -like "*Administrador*" -or $src -eq "ActiveDirectory")
-        $badge = if ($isBuiltIn) { "ok" } else { "warn" }
-        # Si hay mas de 2 admins no built-in, marcar bad
-        if (-not $isBuiltIn -and $adminCount -gt 3) { $badge = "bad"; $adminBad++ }
-        $adminRows += "<tr><td>$name</td><td>$objClass</td><td>$src</td><td><span class='badge $badge'>$(if($badge -eq 'ok'){'Sistema'}else{'Revisar'})</span></td></tr>"
+        $isDomain = ($src -ne "Local" -and $src -ne "" -and $src -ne $null)
+        $isBuiltIn = ($name -like "*Administrator*" -or $name -like "*Administrador*")
+        $badge = if ($isDomain) { "warn" } elseif ($isBuiltIn) { "ok" } else { "warn" }
+        $badgeText = if ($isDomain) { "Dominio (no cuenta para umbral)" } elseif ($isBuiltIn) { "Sistema" } else { "Revisar" }
+        # Solo admins locales cuentan para exceso; Domain Admins ignorados en umbral
+        if (-not $isDomain -and -not $isBuiltIn -and $adminCount -gt 3) { $badge = "bad"; $badgeText = "Exceso local"; $adminBad++ }
+        $adminRows += "<tr><td>$name</td><td>$objClass</td><td>$src</td><td><span class='badge $badge'>$badgeText</span></td></tr>"
     }
-    if ($adminCount -eq 0) {
+    if ($adminCount -eq 0 -and $allForDisplay.Count -eq 0) {
         $adminRows = "<tr><td colspan='4' class='text-muted'>No se encontraron miembros (inusual).</td></tr>"
     } elseif ($adminCount -gt 3) {
         $adminBad = 1
@@ -479,5 +513,5 @@ Write-Host " Hallazgos criticos: $totalBad" -ForegroundColor $(if($totalBad -eq 
 Write-Host "==================================================" -ForegroundColor Green
 Start-Process $OutputFile
 """
-dst.write_text(content, encoding='utf-8')
-print(f"Wrote {len(content.splitlines())} lines, non-ascii: {[c for c in content if ord(c)>127][:10]}")
+dst.write_text(content, encoding="utf-8")
+print("Wrote", len(content.splitlines()), "lines")
