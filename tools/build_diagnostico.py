@@ -16,6 +16,88 @@ content = r"""<#
 #>
 
 #Requires -Version 5.1
+
+param(
+    [string]$OutputPath = "",
+    [switch]$NoOpen,
+    [int]$Days = 2
+)
+
+# --- GOTCHAS DE EJECUCION (entornos endurecidos) ---
+if ($ExecutionContext.SessionState.LanguageMode -ne "FullLanguage") {
+    Write-Host "ADVERTENCIA: LanguageMode=$($ExecutionContext.SessionState.LanguageMode) (no FullLanguage). Algunas secciones fallaran. Ejecuta en host no endurecido o firma el script." -ForegroundColor Yellow
+}
+try {
+    $pol = Get-ExecutionPolicy -List -ErrorAction SilentlyContinue | Where-Object { $_.Scope -eq "MachinePolicy" }
+    if ($pol -and $pol.ExecutionPolicy -ne "Undefined" -and $pol.ExecutionPolicy -ne "Bypass" -and $pol.ExecutionPolicy -ne "Unrestricted") {
+        Write-Host "ADVERTENCIA: MachinePolicy=$($pol.ExecutionPolicy) via GPO. Bypass no aplica. Firma el script o usa GPO de excepcion." -ForegroundColor Yellow
+    }
+} catch {}
+if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) {
+    $sysNative = "$env:WINDIR\SysNative\WindowsPowerShell\v1.0\powershell.exe"
+    $sys64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $target = if (Test-Path $sysNative) { $sysNative } else { $sys64 }
+    Write-Host "AVISO: Ejecutandose en PowerShell 32-bit en OS 64-bit. Relanzando en 64-bit..." -ForegroundColor Yellow
+    try {
+        $args = @("-ExecutionPolicy","Bypass","-File", $PSCommandPath)
+        if ($OutputPath) { $args += @("-OutputPath", $OutputPath) }
+        if ($NoOpen) { $args += "-NoOpen" }
+        & $target @args
+        exit $LASTEXITCODE
+    } catch { Write-Host "No se pudo relanzar en 64-bit: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+
+
+function Test-PendingReboot {
+    $reasons = @()
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reasons += "CBS RebootPending" }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reasons += "WU RebootRequired" }
+    try { if ((Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations) { $reasons += "PendingFileRenameOperations" } } catch {}
+    return $reasons
+}
+function Get-DesktopPathSafe {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    if (-not $desktop -or -not (Test-Path $desktop)) { $desktop = "$env:USERPROFILE\Desktop" }
+    $isOneDrive = ($desktop -like "*OneDrive*")
+    return @{ Path=$desktop; IsOneDrive=$isOneDrive }
+}
+function Get-BatteryViaWmi {
+    try {
+        $static = Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1
+        $full = Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1
+        if ($static -and $full -and $static.DesignedCapacity -gt 0) {
+            return @{ Design=$static.DesignedCapacity; Full=$full.FullChargedCapacity }
+        }
+    } catch {}
+    return $null
+}
+function Invoke-WingetSafe {
+    param([int]$TimeoutSec=25)
+    try {
+        $job = Start-Job -ScriptBlock { winget upgrade --include-unknown --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-String } -ErrorAction Stop
+        $completed = Wait-Job $job -Timeout $TimeoutSec
+        if ($completed) {
+            $out = Receive-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return $out
+        } else {
+            Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return "Winget timeout ${TimeoutSec}s - se omite (posible prompt msstore)"
+        }
+    } catch { return "Winget no disponible: $($_.Exception.Message)" }
+}
+function Get-PendingRebootHtml {
+    $reasons = Test-PendingReboot
+    if ($reasons.Count -gt 0) {
+        $txt = ($reasons -join ", ")
+        return "<tr class='row-bad'><td>Reboot pendiente</td><td>$(ConvertTo-HtmlEscaped $txt)</td><td><span class='badge bad'>Reinicio requerido</span> - causa #1 de lentitud</td></tr>"
+    } else {
+        return "<tr><td>Reboot pendiente</td><td>Ninguno</td><td><span class='badge ok'>OK</span></td></tr>"
+    }
+}
+
+
 $ErrorActionPreference = "SilentlyContinue"
 
 # Helper para escapar texto dinamico antes de inyectarlo en HTML.
@@ -48,7 +130,10 @@ if (-not $isElevated) {
 }
 $ReportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $ComputerName = $env:COMPUTERNAME
-$OutputFile = "$env:USERPROFILE\Desktop\Diagnostico_$ComputerName_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+$desktopInfo = Get-DesktopPathSafe
+$desktopPath = $desktopInfo.Path
+$oneDriveWarn = $desktopInfo.IsOneDrive
+if ($OutputPath) { $OutputFile = $OutputPath } else { $OutputFile = Join-Path $desktopPath ("Diagnostico_${ComputerName}_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".html") }
 
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host " Generando Diagnostico Integral para $ComputerName..." -ForegroundColor Cyan
@@ -322,7 +407,7 @@ $netPingHtml = ($pingResults -join " ")
 # 9. VISOR DE EVENTOS (ERRORES 48H)
 # ----------------------------------------------------
 Write-Host "[9/12] Consultando Visor de Eventos..." -ForegroundColor Yellow
-$sinceDate = (Get-Date).AddDays(-2)
+$sinceDate = (Get-Date).AddDays(-$Days)
 $eventLogAccessDenied = $false
 $events = $null
 try {
@@ -447,7 +532,7 @@ try {
 Write-Host "[12/12] Comprobando Software Desactualizado..." -ForegroundColor Yellow
 $wingetRows = ""
 if (Get-Command winget -ErrorAction SilentlyContinue) {
-    $wingetOut = winget upgrade --include-unknown --accept-source-agreements 2>&1 | Out-String
+    $wingetOut = Invoke-WingetSafe -TimeoutSec 25
     $lines = $wingetOut -split "`r`n" | Where-Object { $_ -match '\S+' -and $_ -notmatch 'Name|Nombre|---|Winget' }
     if ($lines) {
         foreach ($line in ($lines | Select-Object -First 10)) {
@@ -532,6 +617,9 @@ $htmlContent = @"
             <span class="badge ok">Estado General Recopilado</span>
         </div>
     </div>
+
+    <!-- OneDrive warning -->
+    $(if($oneDriveWarn){"<div class=card style=border-color: var(--warn-color);><h3 style=color:var(--warn-color);>Aviso: Escritorio en OneDrive</h3><p class=text-muted>El reporte contiene datos personales (hostname, MAC, admins) y se guardara en OneDrive sincronizado a la nube. LOPDP: verifica retencion y manejo.</p></div>"})
 
     <!-- RESUMEN GENERAL -->
     <div class="grid-summary">
@@ -755,6 +843,15 @@ $htmlContent = @"
         </table>
     </div>
 
+    <!-- REINICIO PENDIENTE -->
+    <div class="card">
+        <h3>Reinicio pendiente</h3>
+        <table><tbody>
+                $pendingRebootRows
+            </tbody></table>
+        <p class="text-muted" style="font-size:12px; margin-top:8px;">Si hay reinicio pendiente, el equipo puede estar lento y updates no aplicados. Reiniciar antes de re-auditar.</p>
+    </div>
+
     <div class="footer">
         Reporte generado automaticamente mediante Script de PowerShell | Soporte Tecnico e Infraestructura
     </div>
@@ -776,10 +873,21 @@ try {
 Write-Host "`n==================================================" -ForegroundColor Green
 Write-Host " Reporte generado con exito en:" -ForegroundColor Green
 Write-Host " $OutputFile" -ForegroundColor Cyan
+if ($oneDriveWarn) { Write-Host " ADVERTENCIA: Destino en OneDrive - datos personales en nube" -ForegroundColor Yellow }
+try {
+    $hash = (Get-FileHash -Path $OutputFile -Algorithm SHA256 -ErrorAction Stop).Hash
+    Write-Host " SHA256: $hash" -ForegroundColor Gray
+    $hashHtml = "<p class='text-muted' style='font-size:11px; margin-top:8px;'>SHA256: $hash | UTC: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))Z | Host: $computerEsc</p>"
+    # Append hash to HTML file as comment for integrity
+    Add-Content -Path $OutputFile -Value "<!-- SHA256:$hash UTC:$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))Z -->" -ErrorAction SilentlyContinue
+} catch {}
 Write-Host "==================================================" -ForegroundColor Green
 
-# Abrir reporte en el navegador predeterminado
-Start-Process $OutputFile
+if (-not $NoOpen) { Start-Process $OutputFile } else { Write-Host " NoOpen: reporte no abierto automaticamente." -ForegroundColor Gray }
+# Exit code para RMM: 0=ok, 1=hallazgos
+$exitBad = 0
+try { if ($pendingRebootRows -like "*bad*") { $exitBad++ } } catch {}
+if ($totalBad -gt 0 -or $exitBad -gt 0) { exit 1 } else { exit 0 }
 """
 dst.write_text(content, encoding="utf-8")
 print("Wrote", len(content.splitlines()), "lines")

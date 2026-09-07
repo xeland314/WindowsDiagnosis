@@ -26,15 +26,15 @@
 |--------|-----------|-------------|---------------|
 | `Diagnostico-PC-HTML.ps1` | **Salud tecnica** del equipo (hardware, SO, red, updates) | `Desktop\Diagnostico_<HOST>_<fecha>.html` | Ticket de lentitud, inventario, entrega a usuario/soporte |
 | `Auditoria-Autoarranque.ps1` | **Persistencia y masquerading** T1036/T1496/T1546.003 — caso FAHConsole en WinZip | `Desktop\Auditoria_Autoarranque_<HOST>_<fecha>.html` | Sospecha de minero/PUP, DFIR, revision de autoarranque |
-| `Auditoria-LOPDP-Endpoint.ps1` | **Cumplimiento LOPDP Art.10/38** — controles minimos de endpoint con datos personales | `Desktop\Auditoria_LOPDP_<HOST>_<fecha>.html` | Auditoria legal, visita Superintendencia, rodo de laptops contables |
+| `Auditoria-LOPDP-Endpoint.ps1` | **Cumplimiento LOPDP Art.10/38** — 10 bloques (BitLocker, puertos, Firewall, AV, admins + bloqueo, cuentas, LAPS/NLA/SMB, remote/logs/EOL, Defender+/SecureBoot) | `Desktop\Auditoria_LOPDP_<HOST>_<fecha>.html` | Auditoria legal, visita Superintendencia, rodo de laptops contables |
 
 Builders (solo desarrollo, no necesarios para ejecutar):
 
 | Builder | Genera |
 |---------|--------|
-| `tools/build_diagnostico.py` | `Diagnostico-PC-HTML.ps1` (780 lineas, ASCII) |
-| `tools/build_auditoria.py` | `Auditoria-Autoarranque.ps1` (719 lineas, ASCII) |
-| `tools/build_lopdp.py` | `Auditoria-LOPDP-Endpoint.ps1` (477 lineas, ASCII) |
+| `tools/build_diagnostico.py` | `Diagnostico-PC-HTML.ps1` (888 lineas, ASCII) |
+| `tools/build_auditoria.py` | `Auditoria-Autoarranque.ps1` (1262 lineas, ASCII, details cards) |
+| `tools/build_lopdp.py` | `Auditoria-LOPDP-Endpoint.ps1` (1026 lineas, ASCII) |
 
 ```powershell
 # Regenerar tras editar el builder:
@@ -87,7 +87,7 @@ Basado en **FAHConsole.exe** — binario legitimo firmado (0/70 VT) implantado e
 
 ---
 
-## Auditoria-LOPDP-Endpoint.ps1 — 5 bloques (cumplimiento LOPDP)
+## Auditoria-LOPDP-Endpoint.ps1 — 10 bloques (cumplimiento LOPDP)
 
 > **Por que un script separado?** Para **no confundir resultados ni alcance**: `Diagnostico` = salud, `Auditoria-Autoarranque` = amenazas, `LOPDP` = evidencia normativa (Art.10 Seguridad y Art.38 Medidas tecnicas) para la Superintendencia. Cada audiencia recibe solo su reporte.
 
@@ -99,7 +99,7 @@ Basado en **FAHConsole.exe** — binario legitimo firmado (0/70 VT) implantado e
 | 4 | **Antivirus** | Proteccion off para pirateria → sin deteccion | `Get-MpComputerStatus` `AMServiceEnabled`/`RealTimeProtectionEnabled`/`AntivirusSignatureLastUpdated` fallback `root/SecurityCenter2` | `bad` si off o firmas >7 dias | `Update-MpSignature` + Tamper Protection |
 | 5 | **Admins locales** | Usuario finanzas como Admin → malware hereda privilegios | `Get-LocalGroupMember -SID S-1-5-32-544` (idioma-indep.) fallback `net localgroup` | `warn` 3 cuentas, `bad` >3 | `Remove-LocalGroupMember`, LAPS, max 2 admins |
 
-Resumen global `grid-summary` con 5 cards + badge `ok/warn/bad` (`totalBad` suman los 5 controles). Si no es sesion Admin, muestra `No verificado` en vez de falso OK.
+Resumen global `grid-summary` con 10 bloques (`totalBad` = core 5 + extra 5). Semaforo corrige falsos positivos: 445/135 con FW Block => warn, Domain Admins no cuentan para umbral, 5985/5986 => warn. Incluye `IsOneDrive` warning, params `-OutputPath`/`-NoOpen`/`-Days`, SHA256 + UTC en footer y exit code 1 si hay hallazgos (para RMM). Si no es Admin, `No verificado` en vez de falso OK.
 
 ---
 

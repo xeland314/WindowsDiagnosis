@@ -23,6 +23,88 @@
 #>
 
 #Requires -Version 5.1
+
+param(
+    [string]$OutputPath = "",
+    [switch]$NoOpen,
+    [int]$Days = 2
+)
+
+# --- GOTCHAS DE EJECUCION (entornos endurecidos) ---
+if ($ExecutionContext.SessionState.LanguageMode -ne "FullLanguage") {
+    Write-Host "ADVERTENCIA: LanguageMode=$($ExecutionContext.SessionState.LanguageMode) (no FullLanguage). Algunas secciones fallaran. Ejecuta en host no endurecido o firma el script." -ForegroundColor Yellow
+}
+try {
+    $pol = Get-ExecutionPolicy -List -ErrorAction SilentlyContinue | Where-Object { $_.Scope -eq "MachinePolicy" }
+    if ($pol -and $pol.ExecutionPolicy -ne "Undefined" -and $pol.ExecutionPolicy -ne "Bypass" -and $pol.ExecutionPolicy -ne "Unrestricted") {
+        Write-Host "ADVERTENCIA: MachinePolicy=$($pol.ExecutionPolicy) via GPO. Bypass no aplica. Firma el script o usa GPO de excepcion." -ForegroundColor Yellow
+    }
+} catch {}
+if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) {
+    $sysNative = "$env:WINDIR\SysNative\WindowsPowerShell\v1.0\powershell.exe"
+    $sys64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $target = if (Test-Path $sysNative) { $sysNative } else { $sys64 }
+    Write-Host "AVISO: Ejecutandose en PowerShell 32-bit en OS 64-bit. Relanzando en 64-bit..." -ForegroundColor Yellow
+    try {
+        $args = @("-ExecutionPolicy","Bypass","-File", $PSCommandPath)
+        if ($OutputPath) { $args += @("-OutputPath", $OutputPath) }
+        if ($NoOpen) { $args += "-NoOpen" }
+        & $target @args
+        exit $LASTEXITCODE
+    } catch { Write-Host "No se pudo relanzar en 64-bit: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+
+
+function Test-PendingReboot {
+    $reasons = @()
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reasons += "CBS RebootPending" }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reasons += "WU RebootRequired" }
+    try { if ((Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations) { $reasons += "PendingFileRenameOperations" } } catch {}
+    return $reasons
+}
+function Get-DesktopPathSafe {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    if (-not $desktop -or -not (Test-Path $desktop)) { $desktop = "$env:USERPROFILE\Desktop" }
+    $isOneDrive = ($desktop -like "*OneDrive*")
+    return @{ Path=$desktop; IsOneDrive=$isOneDrive }
+}
+function Get-BatteryViaWmi {
+    try {
+        $static = Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1
+        $full = Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1
+        if ($static -and $full -and $static.DesignedCapacity -gt 0) {
+            return @{ Design=$static.DesignedCapacity; Full=$full.FullChargedCapacity }
+        }
+    } catch {}
+    return $null
+}
+function Invoke-WingetSafe {
+    param([int]$TimeoutSec=25)
+    try {
+        $job = Start-Job -ScriptBlock { winget upgrade --include-unknown --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-String } -ErrorAction Stop
+        $completed = Wait-Job $job -Timeout $TimeoutSec
+        if ($completed) {
+            $out = Receive-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return $out
+        } else {
+            Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return "Winget timeout ${TimeoutSec}s - se omite (posible prompt msstore)"
+        }
+    } catch { return "Winget no disponible: $($_.Exception.Message)" }
+}
+function Get-PendingRebootHtml {
+    $reasons = Test-PendingReboot
+    if ($reasons.Count -gt 0) {
+        $txt = ($reasons -join ", ")
+        return "<tr class='row-bad'><td>Reboot pendiente</td><td>$(ConvertTo-HtmlEscaped $txt)</td><td><span class='badge bad'>Reinicio requerido</span> - causa #1 de lentitud</td></tr>"
+    } else {
+        return "<tr><td>Reboot pendiente</td><td>Ninguno</td><td><span class='badge ok'>OK</span></td></tr>"
+    }
+}
+
+
 $ErrorActionPreference = "SilentlyContinue"
 
 function ConvertTo-HtmlEscaped {
@@ -33,7 +115,10 @@ function ConvertTo-HtmlEscaped {
 
 $ReportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $ComputerName = $env:COMPUTERNAME
-$OutputFile = "$env:USERPROFILE\Desktop\Auditoria_LOPDP_$ComputerName_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+$desktopInfo = Get-DesktopPathSafe
+$desktopPath = $desktopInfo.Path
+$oneDriveWarn = $desktopInfo.IsOneDrive
+if ($OutputPath) { $OutputFile = $OutputPath } else { $OutputFile = Join-Path $desktopPath ("Auditoria_LOPDP_${ComputerName}_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".html") }
 
 $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -789,6 +874,8 @@ $htmlContent = @"
         <div><span class="badge $globalBadge" style="font-size:14px;">$globalText</span></div>
     </div>
 
+    $(if($oneDriveWarn){"<div class='card' style='border-color: var(--warn-color);'><h3 style='color:var(--warn-color);'>Aviso: Escritorio en OneDrive</h3><p class='text-muted'>Este reporte LOPDP contiene datos personales y se sincroniza a OneDrive. Definir retencion y manejo en README.</p></div>"})
+
     <div class="grid-summary">
         <div class="summary-card"><div class="num">$bitlockerSummary</div><div class="text-muted" style="font-size:12px;">Cifrado BitLocker</div></div>
         <div class="summary-card"><div class="num">$listenSummary</div><div class="text-muted" style="font-size:12px;">Puertos expuestos</div></div>
@@ -930,4 +1017,10 @@ Write-Host " Reporte LOPDP generado en:" -ForegroundColor Green
 Write-Host " $OutputFile" -ForegroundColor Cyan
 Write-Host " Hallazgos criticos: $totalBad" -ForegroundColor $(if($totalBad -eq 0){"Green"}else{"Red"})
 Write-Host "==================================================" -ForegroundColor Green
-Start-Process $OutputFile
+try {
+    $hash = (Get-FileHash -Path $OutputFile -Algorithm SHA256 -ErrorAction Stop).Hash
+    Write-Host " SHA256: $hash" -ForegroundColor Gray
+    Add-Content -Path $OutputFile -Value "<!-- SHA256:$hash UTC:$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))Z -->" -ErrorAction SilentlyContinue
+} catch {}
+if (-not $NoOpen) { Start-Process $OutputFile } else { Write-Host " NoOpen: no abierto" -ForegroundColor Gray }
+if ($totalBad -gt 0) { exit 1 } else { exit 0 }

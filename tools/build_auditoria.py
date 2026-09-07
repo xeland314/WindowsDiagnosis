@@ -29,6 +29,88 @@ content = r"""<#
 #>
 
 #Requires -Version 5.1
+
+param(
+    [string]$OutputPath = "",
+    [switch]$NoOpen,
+    [int]$Days = 2
+)
+
+# --- GOTCHAS DE EJECUCION (entornos endurecidos) ---
+if ($ExecutionContext.SessionState.LanguageMode -ne "FullLanguage") {
+    Write-Host "ADVERTENCIA: LanguageMode=$($ExecutionContext.SessionState.LanguageMode) (no FullLanguage). Algunas secciones fallaran. Ejecuta en host no endurecido o firma el script." -ForegroundColor Yellow
+}
+try {
+    $pol = Get-ExecutionPolicy -List -ErrorAction SilentlyContinue | Where-Object { $_.Scope -eq "MachinePolicy" }
+    if ($pol -and $pol.ExecutionPolicy -ne "Undefined" -and $pol.ExecutionPolicy -ne "Bypass" -and $pol.ExecutionPolicy -ne "Unrestricted") {
+        Write-Host "ADVERTENCIA: MachinePolicy=$($pol.ExecutionPolicy) via GPO. Bypass no aplica. Firma el script o usa GPO de excepcion." -ForegroundColor Yellow
+    }
+} catch {}
+if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) {
+    $sysNative = "$env:WINDIR\SysNative\WindowsPowerShell\v1.0\powershell.exe"
+    $sys64 = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $target = if (Test-Path $sysNative) { $sysNative } else { $sys64 }
+    Write-Host "AVISO: Ejecutandose en PowerShell 32-bit en OS 64-bit. Relanzando en 64-bit..." -ForegroundColor Yellow
+    try {
+        $args = @("-ExecutionPolicy","Bypass","-File", $PSCommandPath)
+        if ($OutputPath) { $args += @("-OutputPath", $OutputPath) }
+        if ($NoOpen) { $args += "-NoOpen" }
+        & $target @args
+        exit $LASTEXITCODE
+    } catch { Write-Host "No se pudo relanzar en 64-bit: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+
+
+function Test-PendingReboot {
+    $reasons = @()
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reasons += "CBS RebootPending" }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reasons += "WU RebootRequired" }
+    try { if ((Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations) { $reasons += "PendingFileRenameOperations" } } catch {}
+    return $reasons
+}
+function Get-DesktopPathSafe {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    if (-not $desktop -or -not (Test-Path $desktop)) { $desktop = "$env:USERPROFILE\Desktop" }
+    $isOneDrive = ($desktop -like "*OneDrive*")
+    return @{ Path=$desktop; IsOneDrive=$isOneDrive }
+}
+function Get-BatteryViaWmi {
+    try {
+        $static = Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1
+        $full = Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1
+        if ($static -and $full -and $static.DesignedCapacity -gt 0) {
+            return @{ Design=$static.DesignedCapacity; Full=$full.FullChargedCapacity }
+        }
+    } catch {}
+    return $null
+}
+function Invoke-WingetSafe {
+    param([int]$TimeoutSec=25)
+    try {
+        $job = Start-Job -ScriptBlock { winget upgrade --include-unknown --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-String } -ErrorAction Stop
+        $completed = Wait-Job $job -Timeout $TimeoutSec
+        if ($completed) {
+            $out = Receive-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return $out
+        } else {
+            Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+            return "Winget timeout ${TimeoutSec}s - se omite (posible prompt msstore)"
+        }
+    } catch { return "Winget no disponible: $($_.Exception.Message)" }
+}
+function Get-PendingRebootHtml {
+    $reasons = Test-PendingReboot
+    if ($reasons.Count -gt 0) {
+        $txt = ($reasons -join ", ")
+        return "<tr class='row-bad'><td>Reboot pendiente</td><td>$(ConvertTo-HtmlEscaped $txt)</td><td><span class='badge bad'>Reinicio requerido</span> - causa #1 de lentitud</td></tr>"
+    } else {
+        return "<tr><td>Reboot pendiente</td><td>Ninguno</td><td><span class='badge ok'>OK</span></td></tr>"
+    }
+}
+
+
 $ErrorActionPreference = "SilentlyContinue"
 
 function ConvertTo-HtmlEscaped {
@@ -39,7 +121,10 @@ function ConvertTo-HtmlEscaped {
 
 $ReportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $ComputerName = $env:COMPUTERNAME
-$OutputFile = "$env:USERPROFILE\Desktop\Auditoria_Autoarranque_$ComputerName_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+$desktopInfo = Get-DesktopPathSafe
+$desktopPath = $desktopInfo.Path
+$oneDriveWarn = $desktopInfo.IsOneDrive
+if ($OutputPath) { $OutputFile = $OutputPath } else { $OutputFile = Join-Path $desktopPath ("Auditoria_Autoarranque_${ComputerName}_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".html") }
 
 $KnownIOCHashes = @{
     "CD0AE8B96FB2200E63DAE28B45964B4D56BDAF999B79ED23BAE79F9C5C9CD5B5" = "FAHConsole.exe implantado en WinZip (caso ISABEL-3501)"
@@ -136,7 +221,7 @@ function Get-FileAudit {
 # ----------------------------------------------------
 # 1. RECOLECCION DE FUENTES DE AUTOARRANQUE
 # ----------------------------------------------------
-Write-Host "[1/10] Recolectando fuentes de autoarranque (Run, Inicio, Tareas, Servicios)..." -ForegroundColor Yellow
+Write-Host "[1/11] Recolectando fuentes de autoarranque (Run, Inicio, Tareas, Servicios)..." -ForegroundColor Yellow
 $entries = New-Object System.Collections.Generic.List[Object]
 Get-CimInstance Win32_StartupCommand | ForEach-Object {
     $entries.Add([PSCustomObject]@{
@@ -173,7 +258,7 @@ Write-Host "  -> $($entries.Count) entradas encontradas." -ForegroundColor Gray
 # ----------------------------------------------------
 # 2. AUDITORIA DE CADA EJECUTABLE
 # ----------------------------------------------------
-Write-Host "[2/10] Verificando firma, fabricante y hash..." -ForegroundColor Yellow
+Write-Host "[2/11] Verificando firma, fabricante y hash..." -ForegroundColor Yellow
 $auditResults = New-Object System.Collections.Generic.List[Object]
 $seenPaths = @{}
 foreach ($entry in $entries) {
@@ -203,7 +288,7 @@ $mismatchHits = $auditResults | Where-Object { $_.Mismatch -and $_.Mismatch.Mism
 # ----------------------------------------------------
 # 3. THROTTLING DE CPU - metrica fiable (no CurrentClockSpeed)
 # ----------------------------------------------------
-Write-Host "[3/10] Verificando frecuencia de CPU (throttling)..." -ForegroundColor Yellow
+Write-Host "[3/11] Verificando frecuencia de CPU (throttling)..." -ForegroundColor Yellow
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $maxClock = $cpu.MaxClockSpeed
 $curClock = $cpu.CurrentClockSpeed
@@ -230,7 +315,7 @@ $clockNotePerf = if ($null -ne $perfPct) { " (Perf: $perfPct% via ProcessorInfor
 # ----------------------------------------------------
 # 4. PROCESOS TOP CPU - muestreo delta 1.2s (no segundos acumulados)
 # ----------------------------------------------------
-Write-Host "[4/10] Foto de procesos con mayor CPU (muestreo delta 1.2s)..." -ForegroundColor Yellow
+Write-Host "[4/11] Foto de procesos con mayor CPU (muestreo delta 1.2s)..." -ForegroundColor Yellow
 $procSample1 = @{}
 try {
     Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $procSample1[$_.Id] = $_.CPU }
@@ -247,7 +332,7 @@ $topProcs = Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
 # ----------------------------------------------------
 # 5. WMI SUBSCRIPTIONS (T1546.003) - Persistencia sin archivo
 # ----------------------------------------------------
-Write-Host "[5/10] Auditando suscripciones WMI (root/subscription)..." -ForegroundColor Yellow
+Write-Host "[5/11] Auditando suscripciones WMI (root/subscription)..." -ForegroundColor Yellow
 $wmiFilterRows = ""
 $wmiConsumerRows = ""
 $wmiBindingRows = ""
@@ -311,7 +396,7 @@ $wmiBadgeText = if ($wmiSuspiciousCount -gt 0) { "$wmiSuspiciousCount sospechoso
 # ----------------------------------------------------
 # 6. EXCLUSIONES DE DEFENDER
 # ----------------------------------------------------
-Write-Host "[6/10] Auditando exclusiones de Defender..." -ForegroundColor Yellow
+Write-Host "[6/11] Auditando exclusiones de Defender..." -ForegroundColor Yellow
 $defenderExclusionHtml = ""
 $defenderExclusionRows = ""
 $defenderExclusionCount = 0
@@ -349,7 +434,7 @@ if ($defenderExclusionRows -match "row-bad") { $exclusionBadge = "bad" }
 # ----------------------------------------------------
 # 7. CONEXIONES DE RED A PROCESO (mineria activa)
 # ----------------------------------------------------
-Write-Host "[7/10] Mapeando conexiones de red a procesos..." -ForegroundColor Yellow
+Write-Host "[7/11] Mapeando conexiones de red a procesos..." -ForegroundColor Yellow
 $tcpRows = ""
 $miningPorts = @(3333,4444,5555,7777,14444,14433,3032,5553,8008,8080)
 $miningHits = 0
@@ -389,7 +474,7 @@ $tcpBadge = if ($miningHits -gt 0) { "bad" } else { "ok" }
 # ----------------------------------------------------
 # 8. EXTENSIONES DE NAVEGADOR
 # ----------------------------------------------------
-Write-Host "[8/10] Revisando extensiones de navegador..." -ForegroundColor Yellow
+Write-Host "[8/11] Revisando extensiones de navegador..." -ForegroundColor Yellow
 $extRows = ""
 $extCount = 0
 try {
@@ -435,7 +520,7 @@ $extBadge = if ($extCount -gt 20) { "warn" } else { "ok" }
 # ----------------------------------------------------
 # 9. ESTADO StartupApproved (Habilitado/Deshabilitado)
 # ----------------------------------------------------
-Write-Host "[9/10] Verificando estado StartupApproved..." -ForegroundColor Yellow
+Write-Host "[9/11] Verificando estado StartupApproved..." -ForegroundColor Yellow
 $approvedRows = ""
 try {
     $approvedPaths = @(
@@ -482,7 +567,7 @@ try {
 # ----------------------------------------------------
 # 10. IFEO / AppInit_DLLs
 # ----------------------------------------------------
-Write-Host "[10/10] Revisando IFEO y AppInit_DLLs..." -ForegroundColor Yellow
+Write-Host "[10/11] Revisando IFEO y AppInit_DLLs..." -ForegroundColor Yellow
 $ifeoRows = ""
 $appInitHtml = ""
 try {
@@ -521,6 +606,351 @@ try {
 } catch {
     $appInitHtml = "<p class='text-muted'>No se pudo consultar AppInit_DLLs: $(ConvertTo-HtmlEscaped $_.Exception.Message)</p>"
 }
+
+# ----------------------------------------------------
+# 11. PERSISTENCIA AVANZADA - Checklist Autoruns (Wow6432Node, Policies, COM, Winlogon, etc.)
+# ----------------------------------------------------
+Write-Host "[11/11] Auditando persistencia avanzada (Autoruns checklist)..." -ForegroundColor Yellow
+$advWowRows = ""; $advPoliciesRows = ""; $advComRows = ""; $advWinlogonRows = ""; $advExefileRows = ""
+$advOfficeRows = ""; $advProfileRows = ""; $advNativeRows = ""; $advHostsRows = ""; $advProxyRows = ""
+$advUnquotedRows = ""; $advTasksTempRows = ""; $advRareRows = ""; $advLnkRows = ""
+$advBad = 0
+# Wow6432Node + HKU Run de otros perfiles
+try {
+    $wowPaths = @(
+        "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    )
+    foreach ($wp in $wowPaths) {
+        try {
+            $props = Get-ItemProperty -Path $wp -ErrorAction Stop
+            foreach ($p in $props.PSObject.Properties) {
+                if ($p.Name -match "^PS") { continue }
+                $val = ConvertTo-HtmlEscaped "$($p.Value)"
+                $name = ConvertTo-HtmlEscaped $p.Name
+                $isWow = ($wp -like "*Wow6432Node*")
+                $badge = if ($isWow) { "warn" } else { "ok" }
+                # Heuristica: valor en Temp/AppData es sospechoso
+                if ("$($p.Value)" -like "*Temp*" -or "$($p.Value)" -like "*AppData*") { $badge = "bad"; $advBad++ }
+                $advWowRows += "<tr class='$(if($badge -eq 'bad'){'row-bad'})'><td>$wp</td><td>$name</td><td style='word-break:break-all;'>$val</td><td><span class='badge $badge'>$(if($isWow){'32-bit'}else{'OK'})</span></td></tr>"
+            }
+        } catch {}
+    }
+    # HKU: enumerar SIDs cargados
+    try {
+        $hku = Get-ChildItem -Path "Registry::HKEY_USERS" -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "S-1-5-21-*" }
+        foreach ($sid in $hku) {
+            $path = "Registry::HKEY_USERS\$($sid.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run"
+            try {
+                $props = Get-ItemProperty -Path $path -ErrorAction Stop
+                foreach ($p in $props.PSObject.Properties) {
+                    if ($p.Name -match "^PS") { continue }
+                    $val = ConvertTo-HtmlEscaped "$($p.Value)"
+                    $name = ConvertTo-HtmlEscaped $p.Name
+                    $sidShort = $sid.PSChildName.Substring($sid.PSChildName.Length-4)
+                    $isTemp = ("$($p.Value)" -like "*Temp*")
+                    $badge = if ($isTemp) { "bad" } else { "warn" }
+                    if ($isTemp) { $advBad++ }
+                    $advWowRows += "<tr class='$(if($badge -eq 'bad'){'row-bad'})'><td>HKU\...$sidShort\...\Run</td><td>$name</td><td style='word-break:break-all;'>$val</td><td><span class='badge $badge'>Perfil $sidShort</span></td></tr>"
+                }
+            } catch {}
+        }
+    } catch {}
+    if (-not $advWowRows) { $advWowRows = "<tr><td colspan='4' class='text-ok'>Sin entradas Wow6432Node/HKU adicionales (normal).</td></tr>" }
+} catch {
+    $advWowRows = "<tr><td colspan='4' class='text-muted'>No se pudo verificar Wow6432Node/HKU: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Policies\Explorer\Run (malware)
+try {
+    $polPaths = @("HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run","HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run")
+    foreach ($pp in $polPaths) {
+        try {
+            $props = Get-ItemProperty -Path $pp -ErrorAction Stop
+            foreach ($p in $props.PSObject.Properties) {
+                if ($p.Name -match "^PS") { continue }
+                $advPoliciesRows += "<tr class='row-bad'><td>$pp</td><td>$(ConvertTo-HtmlEscaped $p.Name)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $p.Value)</td><td><span class='badge bad'>Malware-like</span></td></tr>"
+                $advBad++
+            }
+        } catch {}
+    }
+    if (-not $advPoliciesRows) { $advPoliciesRows = "<tr><td colspan='4' class='text-ok'>Sin Policies\Explorer\Run (limpio).</td></tr>" }
+} catch {
+    $advPoliciesRows = "<tr><td colspan='4' class='text-muted'>Error Policies Run: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# COM hijacking HKCU\Software\Classes\CLSID
+try {
+    $comBase = "HKCU:\Software\Classes\CLSID"
+    $comItems = Get-ChildItem -Path $comBase -ErrorAction SilentlyContinue | Select-Object -First 200
+    $comHits = @()
+    foreach ($item in $comItems) {
+        $inproc = Join-Path $item.PSPath "InprocServer32"
+        if (Test-Path $inproc) {
+            try {
+                $val = (Get-ItemProperty -Path $inproc -ErrorAction Stop)."(default)"
+                if ($val -and $val -ne "" -and $val -notlike "*System32*" -and $val -notlike "*Windows*") {
+                    # Filtrar valores vacios normales
+                    $comHits += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $item.PSChildName)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $val)</td><td><span class='badge bad'>Revisar</span></td></tr>"
+                    $advBad++
+                }
+            } catch {}
+        }
+    }
+    if ($comHits.Count -gt 0) { $advComRows = ($comHits | Select-Object -First 20) -join ""; if ($comHits.Count -gt 20) { $advComRows += "<tr><td colspan='3' class='text-muted'>+ $($comHits.Count-20) mas (revisar completo).</td></tr>" } }
+    else { $advComRows = "<tr><td colspan='3' class='text-ok'>Sin COM hijacking en HKCU\Classes\CLSID\InprocServer32 (muestra 200).</td></tr>" }
+} catch {
+    $advComRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar COM hijacking: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Winlogon Userinit/Shell
+try {
+    $winlogon = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -ErrorAction Stop
+    $userinit = "$($winlogon.Userinit)"
+    $shell = "$($winlogon.Shell)"
+    $uOk = ($userinit -like "*userinit.exe*")
+    $sOk = ($shell -eq "explorer.exe")
+    $uBadge = if ($uOk) { "ok" } else { "bad" }
+    $sBadge = if ($sOk) { "ok" } else { "bad" }
+    if (-not $uOk) { $advBad++ }; if (-not $sOk) { $advBad++ }
+    $advWinlogonRows = "<tr><td>Userinit</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $userinit)</td><td><span class='badge $uBadge'>$(if($uOk){'OK'}else{'Revisar - debe ser userinit.exe,'})</span></td></tr>"
+    $advWinlogonRows += "<tr><td>Shell</td><td>$(ConvertTo-HtmlEscaped $shell)</td><td><span class='badge $sBadge'>$(if($sOk){'OK'}else{'Revisar - debe ser explorer.exe'})</span></td></tr>"
+} catch {
+    $advWinlogonRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar Winlogon: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# exefile hijack
+try {
+    $exefile = $null
+    try { $exefile = (Get-ItemProperty -Path "HKCU:\Software\Classes\exefile\shell\open\command" -ErrorAction Stop)."(default)" } catch {}
+    if (-not $exefile) { try { $exefile = (Get-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\exefile\shell\open\command" -ErrorAction Stop)."(default)" } catch {} }
+    if ($exefile -and $exefile -ne '"%1" %*' -and $exefile -ne '%1 %*') {
+        $advExefileRows = "<tr class='row-bad'><td>exefile\shell\open\command</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $exefile)</td><td><span class='badge bad'>Hijack</span></td></tr>"; $advBad++
+    } else {
+        $exefileEsc = ConvertTo-HtmlEscaped $(if($exefile){"$exefile"}else{"No personalizado"})
+        $advExefileRows = "<tr><td>exefile</td><td>$exefileEsc</td><td><span class='badge ok'>OK</span></td></tr>"
+    }
+} catch {
+    $advExefileRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar exefile: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Office add-ins + XLSTART
+try {
+    $officeHits = @()
+    $officePaths = @("HKCU:\Software\Microsoft\Office\16.0\Word\Addins","HKCU:\Software\Microsoft\Office\16.0\Excel\Addins","HKCU:\Software\Microsoft\Office\16.0\Outlook\Addins","HKCU:\Software\Microsoft\Office\15.0\Word\Addins")
+    foreach ($op in $officePaths) {
+        try {
+            $items = Get-ChildItem -Path $op -ErrorAction Stop
+            foreach ($it in $items) {
+                $officeHits += "<tr><td>$op\$(ConvertTo-HtmlEscaped $it.PSChildName)</td><td>$(ConvertTo-HtmlEscaped (Get-ItemProperty $it.PSPath -ErrorAction SilentlyContinue | Out-String).Substring(0,200))</td><td><span class='badge warn'>Revisar</span></td></tr>"
+            }
+        } catch {}
+    }
+    $xlPaths = @("$env:APPDATA\Microsoft\Excel\XLSTART","$env:APPDATA\Microsoft\Word\STARTUP")
+    foreach ($xp in $xlPaths) {
+        if (Test-Path $xp) {
+            try {
+                $files = Get-ChildItem -Path $xp -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match "\.(xlam|dotm|xla)" }
+                foreach ($f in $files) {
+                    $officeHits += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $xp)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $f.FullName)</td><td><span class='badge bad'>Add-in en XLSTART</span></td></tr>"; $advBad++
+                }
+            } catch {}
+        }
+    }
+    if ($officeHits.Count -gt 0) { $advOfficeRows = ($officeHits -join "") } else { $advOfficeRows = "<tr><td colspan='3' class='text-ok'>Sin Office add-ins sospechosos en XLSTART/Addins.</td></tr>" }
+} catch {
+    $advOfficeRows = "<tr><td colspan='3' class='text-muted'>Error Office add-ins: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# PowerShell profiles + history
+try {
+    $profiles = @($PROFILE.AllUsersAllHosts,$PROFILE.AllUsersCurrentHost,$PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost)
+    $foundProfiles = @()
+    foreach ($pr in $profiles) {
+        if ($pr -and (Test-Path $pr)) {
+            $foundProfiles += "<tr><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $pr)</td><td>Existe ($( (Get-Item $pr).Length) bytes)</td><td><span class='badge warn'>Revisar contenido</span></td></tr>"
+        }
+    }
+    $hist = "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+    if (Test-Path $hist) {
+        $lines = (Get-Content $hist -ErrorAction SilentlyContinue | Select-Object -Last 5) -join "; "
+        $foundProfiles += "<tr><td>$(ConvertTo-HtmlEscaped $hist)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $lines.Substring(0,[math]::Min(200,$lines.Length)))</td><td><span class='badge ok'>Historial (forense)</span></td></tr>"
+    }
+    if ($foundProfiles.Count -gt 0) { $advProfileRows = ($foundProfiles -join "") } else { $advProfileRows = "<tr><td colspan='3' class='text-ok'>Sin perfiles de PowerShell personalizados (limpio).</td></tr>" }
+} catch {
+    $advProfileRows = "<tr><td colspan='3' class='text-muted'>Error profiles: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Native messaging hosts + Firefox
+try {
+    $nativeHits = @()
+    $nmPaths = @("HKLM:\SOFTWARE\Google\Chrome\NativeMessagingHosts","HKLM:\SOFTWARE\Microsoft\Edge\NativeMessagingHosts","HKLM:\SOFTWARE\Mozilla\NativeMessagingHosts")
+    foreach ($np in $nmPaths) {
+        try {
+            $items = Get-ChildItem -Path $np -ErrorAction Stop
+            foreach ($it in $items) {
+                $manifest = (Get-ItemProperty -Path $it.PSPath -ErrorAction SilentlyContinue)."(default)"
+                $nativeHits += "<tr><td>$np\$(ConvertTo-HtmlEscaped $it.PSChildName)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $manifest)</td><td><span class='badge warn'>Revisar</span></td></tr>"
+            }
+        } catch {}
+    }
+    # Firefox extensions
+    $firefoxBase = "$env:APPDATA\Mozilla\Firefox\Profiles"
+    if (Test-Path $firefoxBase) {
+        try {
+            $extFiles = Get-ChildItem -Path $firefoxBase -Recurse -Filter "extensions.json" -ErrorAction SilentlyContinue | Select-Object -First 3
+            foreach ($ef in $extFiles) {
+                $nativeHits += "<tr><td>Firefox</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $ef.FullName)</td><td><span class='badge ok'>Perfil Firefox</span></td></tr>"
+            }
+        } catch {}
+    }
+    if ($nativeHits.Count -gt 0) { $advNativeRows = ($nativeHits -join "") } else { $advNativeRows = "<tr><td colspan='3' class='text-ok'>Sin Native Messaging Hosts sospechosos.</td></tr>" }
+} catch {
+    $advNativeRows = "<tr><td colspan='3' class='text-muted'>Error native hosts: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# hosts + proxy + DNS cache
+try {
+    $hostsPath = "C:\Windows\System32\drivers\etc\hosts"
+    $hostsLines = Get-Content $hostsPath -ErrorAction Stop | Where-Object { $_ -match "^\s*\d+\.\d+\.\d+\.\d+\s+\S+" -and $_ -notmatch "^\s*#" -and $_ -notmatch "localhost" }
+    if ($hostsLines) {
+        foreach ($hl in ($hostsLines | Select-Object -First 10)) {
+            $advHostsRows += "<tr class='row-bad'><td>hosts</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $hl)</td><td><span class='badge bad'>Entrada no estandar</span></td></tr>"; $advBad++
+        }
+    } else { $advHostsRows = "<tr><td colspan='3' class='text-ok'>hosts limpio (solo localhost/comentarios).</td></tr>" }
+} catch {
+    $advHostsRows = "<tr><td colspan='3' class='text-muted'>No se pudo leer hosts: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+try {
+    $proxyEnable = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop).ProxyEnable
+    $proxyServer = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyServer
+    $autoConfig = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).AutoConfigURL
+    $proxyBadge = if ($proxyEnable -eq 1) { "warn" } else { "ok" }
+    $advProxyRows = "<tr><td>ProxyEnable</td><td>$proxyEnable</td><td><span class='badge $proxyBadge'>$(if($proxyEnable -eq 1){'Activo'}else{'No'})</span></td></tr>"
+    if ($proxyServer) { $advProxyRows += "<tr><td>ProxyServer</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $proxyServer)</td><td><span class='badge warn'>Revisar</span></td></tr>" }
+    if ($autoConfig) { $advProxyRows += "<tr><td>AutoConfigURL</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $autoConfig)</td><td><span class='badge warn'>PAC</span></td></tr>" }
+    try {
+        $dns = Get-DnsClientCache -ErrorAction Stop | Select-Object -First 10
+        if ($dns) {
+            foreach ($d in $dns) {
+                $advProxyRows += "<tr><td>DNS Cache</td><td>$(ConvertTo-HtmlEscaped $d.Name) -> $(ConvertTo-HtmlEscaped $d.Data)</td><td class='text-muted'>TTL $($d.TimeToLive)</td></tr>"
+            }
+        }
+    } catch {
+        try { $dnsTxt = ipconfig /displaydns 2>&1 | Select-String -Pattern "Nombre de registro" | Select-Object -First 5; foreach ($dd in $dnsTxt) { $advProxyRows += "<tr><td>DNS</td><td>$(ConvertTo-HtmlEscaped $dd.Line.Trim())</td><td class='text-muted'>ipconfig</td></tr>" } } catch {}
+    }
+} catch {
+    $advProxyRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar proxy/DNS: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Unquoted service path + writable path
+try {
+    $svcs = Get-CimInstance Win32_Service -ErrorAction Stop
+    $unquotedHits = @()
+    foreach ($svc in $svcs) {
+        $path = $svc.PathName
+        if (-not $path) { continue }
+        # Unquoted con espacio y sin comillas iniciales
+        $isUnquoted = ($path -like "* *" -and $path -notlike '"*"*' -and $path -like "*.exe*")
+        $isWritablePath = ($path -like "*\Users\*" -or $path -like "*\Temp\*" -or $path -like "*\AppData\*")
+        if ($isUnquoted) {
+            $unquotedHits += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $svc.Name)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $path)</td><td><span class='badge bad'>Unquoted path</span></td></tr>"; $advBad++
+        } elseif ($isWritablePath) {
+            $unquotedHits += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $svc.Name)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $path)</td><td><span class='badge bad'>Ruta escribible por usuario</span></td></tr>"; $advBad++
+        }
+    }
+    if ($unquotedHits.Count -gt 0) { $advUnquotedRows = ($unquotedHits | Select-Object -First 15) -join ""; if ($unquotedHits.Count -gt 15) { $advUnquotedRows += "<tr><td colspan='3' class='text-muted'>+ $($unquotedHits.Count-15) mas</td></tr>" } }
+    else { $advUnquotedRows = "<tr><td colspan='3' class='text-ok'>Sin servicios con unquoted path ni ruta escribible (revisados $($svcs.Count)).</td></tr>" }
+} catch {
+    $advUnquotedRows = "<tr><td colspan='3' class='text-muted'>No se pudo verificar servicios: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Tareas con Temp/AppData
+try {
+    $tempTasks = @()
+    try {
+        $allTasks = Get-ScheduledTask -ErrorAction Stop
+        foreach ($tsk in $allTasks) {
+            foreach ($act in $tsk.Actions) {
+                $exe = "$($act.Execute) $($act.Arguments)"
+                if ($exe -like "*Temp*" -or $exe -like "*AppData*" -or $exe -like "*\Users\*\Downloads\*") {
+                    $tempTasks += "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $tsk.TaskName)</td><td>$(ConvertTo-HtmlEscaped $tsk.TaskPath)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $exe)</td></tr>"; $advBad++
+                }
+            }
+        }
+    } catch {}
+    if ($tempTasks.Count -gt 0) { $advTasksTempRows = ($tempTasks | Select-Object -First 15) -join "" } else { $advTasksTempRows = "<tr><td colspan='3' class='text-ok'>Sin tareas con ejecutable en Temp/AppData.</td></tr>" }
+} catch {
+    $advTasksTempRows = "<tr><td colspan='3' class='text-muted'>Error tareas Temp: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# Vectores raros: netsh helpers, Lsa Security Packages, Print Processors, Time Providers, BYOVD, BITS
+try {
+    $rareHits = @()
+    # netsh helpers
+    try {
+        $helpers = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NetSh" -ErrorAction Stop
+        foreach ($p in $helpers.PSObject.Properties) {
+            if ($p.Name -match "^PS") { continue }
+            $rareHits += "<tr><td>NetSh Helper</td><td>$(ConvertTo-HtmlEscaped $p.Name) = $(ConvertTo-HtmlEscaped $p.Value)</td><td><span class='badge warn'>Revisar</span></td></tr>"
+        }
+    } catch {}
+    # Lsa Security Packages
+    try {
+        $lsa = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction Stop)."Security Packages"
+        $known = @("kerberos","msv1_0","schannel","wdigest","tspkg","pku2u")
+        foreach ($pkg in $lsa) {
+            if ($pkg -and $known -notcontains $pkg.ToLower()) {
+                $rareHits += "<tr class='row-bad'><td>Lsa Security Package</td><td>$(ConvertTo-HtmlEscaped $pkg)</td><td><span class='badge bad'>Desconocido (mimikatz?)</span></td></tr>"; $advBad++
+            }
+        }
+    } catch {}
+    # Print Processors
+    try {
+        $procs = Get-ChildItem -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Environments\Windows x64\Print Processors" -ErrorAction SilentlyContinue
+        foreach ($pr in $procs) {
+            $drv = (Get-ItemProperty -Path $pr.PSPath -ErrorAction SilentlyContinue).Driver
+            if ($drv -and $drv -notlike "*winprint*") {
+                $rareHits += "<tr><td>Print Processor</td><td>$(ConvertTo-HtmlEscaped $pr.PSChildName) -> $(ConvertTo-HtmlEscaped $drv)</td><td><span class='badge warn'>Revisar</span></td></tr>"
+            }
+        }
+    } catch {}
+    # BITS jobs
+    try {
+        $bits = Get-BitsTransfer -AllUsers -ErrorAction Stop | Select-Object -First 5
+        foreach ($b in $bits) {
+            $rareHits += "<tr><td>BITS</td><td>$(ConvertTo-HtmlEscaped $b.DisplayName) -> $(ConvertTo-HtmlEscaped $b.FileList)</td><td><span class='badge warn'>Job activo</span></td></tr>"
+        }
+    } catch {}
+    # Drivers fuera de System32\drivers
+    try {
+        $drvs = Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue | Where-Object { $_.PathName -and $_.PathName -notlike "*\System32\drivers\*" -and $_.PathName -like "*.sys*" } | Select-Object -First 5
+        foreach ($d in $drvs) {
+            $rareHits += "<tr><td>Driver fuera de System32</td><td>$(ConvertTo-HtmlEscaped $d.Name) -> $(ConvertTo-HtmlEscaped $d.PathName)</td><td><span class='badge warn'>Posible BYOVD</span></td></tr>"
+        }
+    } catch {}
+    if ($rareHits.Count -gt 0) { $advRareRows = ($rareHits -join "") } else { $advRareRows = "<tr><td colspan='3' class='text-ok'>Sin vectores raros detectados (NetSh/Lsa/Print/BITS/BYOVD).</td></tr>" }
+} catch {
+    $advRareRows = "<tr><td colspan='3' class='text-muted'>Error vectores raros: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+# .lnk resolver Startup
+try {
+    $lnkHits = @()
+    $startupPaths = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
+    )
+    foreach ($sp in $startupPaths) {
+        if (Test-Path $sp) {
+            $lnks = Get-ChildItem -Path $sp -Filter "*.lnk" -ErrorAction SilentlyContinue
+            foreach ($lnk in $lnks) {
+                try {
+                    $sh = New-Object -COM WScript.Shell
+                    $target = $sh.CreateShortcut($lnk.FullName).TargetPath
+                    $isTemp = ($target -like "*Temp*" -or $target -like "*AppData*")
+                    $badge = if ($isTemp) { "bad" } else { "ok" }
+                    if ($isTemp) { $advBad++ }
+                    $lnkHits += "<tr class='$(if($isTemp){'row-bad'})'><td>$(ConvertTo-HtmlEscaped $lnk.Name)</td><td style='word-break:break-all;'>$(ConvertTo-HtmlEscaped $target)</td><td><span class='badge $badge'>$(if($isTemp){'Temp/AppData -> Revisar'}else{'OK'})</span></td></tr>"
+                } catch {}
+            }
+        }
+    }
+    if ($lnkHits.Count -gt 0) { $advLnkRows = ($lnkHits -join "") } else { $advLnkRows = "<tr><td colspan='3' class='text-ok'>Sin .lnk sospechosos en Inicio (o sin .lnk).</td></tr>" }
+} catch {
+    $advLnkRows = "<tr><td colspan='3' class='text-muted'>No se pudo resolver .lnk: $(ConvertTo-HtmlEscaped $_.Exception.Message)</td></tr>"
+}
+$advSummary = if ($advBad -gt 0) { "$advBad hallazgo(s) en persistencia avanzada" } else { "Sin hallazgos en checklist Autoruns" }
+$advBadge = if ($advBad -gt 0) { "bad" } elseif ($advWowRows -match "warn") { "warn" } else { "ok" }
 
 # ----------------------------------------------------
 # GENERACION DE HTML (resumen previo)
@@ -690,6 +1120,8 @@ $htmlContent = @"
         <div><span class="badge ok">Auditoria completada</span></div>
     </div>
 
+    $(if($oneDriveWarn){"<div class='card' style='border-color: var(--warn-color);'><h3 style='color:var(--warn-color);'>Aviso: Escritorio en OneDrive</h3><p class='text-muted'>Reporte con datos personales en OneDrive - verificar manejo LOPDP.</p></div>"})
+
     $iocSummaryHtml
 
     <div class="card">
@@ -757,6 +1189,39 @@ $htmlContent = @"
         $appInitHtml
     </div>
 
+    <!-- 11. Persistencia avanzada (checklist Autoruns) -->
+    <div class="card">
+        <h3>Persistencia avanzada - Checklist Autoruns <span class="badge $advBadge">$advSummary</span></h3>
+        <p class="text-muted" style="font-size:12px; margin-bottom:10px;">Basado en Sysinternals Autoruns. Cubre vectores modernos que Win32_StartupCommand no ve. Cada sub-tabla es colapsable; badge <span class="badge bad">bad</span> = revisar inmediato.</p>
+        <h4>Wow6432Node Run + HKU per-perfil</h4>
+        <table><thead><tr><th>Registro</th><th>Nombre</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advWowRows</tbody></table>
+        <h4>Policies Explorer Run (malware)</h4>
+        <table><thead><tr><th>Registro</th><th>Nombre</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advPoliciesRows</tbody></table>
+        <h4>COM Hijacking (HKCU Classes CLSID InprocServer32)</h4>
+        <table><thead><tr><th>CLSID</th><th>DLL</th><th>Estado</th></tr></thead><tbody>$advComRows</tbody></table>
+        <h4>Winlogon Userinit / Shell</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advWinlogonRows</tbody></table>
+        <h4>Exefile hijack</h4>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advExefileRows</tbody></table>
+        <h4>Office Add-ins / XLSTART</h4>
+        <table><thead><tr><th>Ruta</th><th>Detalle</th><th>Estado</th></tr></thead><tbody>$advOfficeRows</tbody></table>
+        <h4>Perfiles PowerShell + historial</h4>
+        <table><thead><tr><th>Ruta</th><th>Detalle</th><th>Estado</th></tr></thead><tbody>$advProfileRows</tbody></table>
+        <h4>Native Messaging Hosts + Firefox</h4>
+        <table><thead><tr><th>Ruta</th><th>Manifest</th><th>Estado</th></tr></thead><tbody>$advNativeRows</tbody></table>
+        <h4>Hosts / Proxy / DNS Cache</h4>
+        <table><thead><tr><th>Tipo</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advHostsRows</tbody></table>
+        <table><thead><tr><th>Item</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advProxyRows</tbody></table>
+        <h4>Servicios: Unquoted Path / Ruta escribible</h4>
+        <table><thead><tr><th>Servicio</th><th>ImagePath</th><th>Estado</th></tr></thead><tbody>$advUnquotedRows</tbody></table>
+        <h4>Tareas en Temp/AppData</h4>
+        <table><thead><tr><th>Tarea</th><th>Path</th><th>Ejecutable</th></tr></thead><tbody>$advTasksTempRows</tbody></table>
+        <h4>Vectores raros (NetSh, LSA, Print, BITS, BYOVD)</h4>
+        <table><thead><tr><th>Tipo</th><th>Valor</th><th>Estado</th></tr></thead><tbody>$advRareRows</tbody></table>
+        <h4>.lnk en Inicio (WScript.Shell)</h4>
+        <table><thead><tr><th>.lnk</th><th>Target</th><th>Estado</th></tr></thead><tbody>$advLnkRows</tbody></table>
+    </div>
+
     <div class="card">
         <h3>Top 10 Procesos por Consumo de CPU (delta 1.2s - uso real)</h3>
         <p class="text-muted" style="font-size:12px; margin-bottom:8px;">Antes se ordenaba por segundos acumulados (el navegador de 3 dias tapaba al minero). Ahora se muestrea con 2 snapshots y delta - evita falsos negativos.</p>
@@ -789,7 +1254,13 @@ try {
 Write-Host "`n==================================================" -ForegroundColor Green
 Write-Host " Reporte generado en: $OutputFile" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Green
-Start-Process $OutputFile
+try {
+    $hash = (Get-FileHash -Path $OutputFile -Algorithm SHA256 -ErrorAction Stop).Hash
+    Write-Host " SHA256: $hash" -ForegroundColor Gray
+    Add-Content -Path $OutputFile -Value "<!-- SHA256:$hash UTC:$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))Z -->" -ErrorAction SilentlyContinue
+} catch {}
+if (-not $NoOpen) { Start-Process $OutputFile } else { Write-Host " NoOpen: no abierto" -ForegroundColor Gray }
+if ($iocHits.Count -gt 0 -or $advBad -gt 0 -or $wmiSuspiciousCount -gt 0) { exit 1 } else { exit 0 }
 
 """
 dst.write_text(content, encoding="utf-8")
