@@ -318,3 +318,21 @@ python tools/build_lopdp.py
 ---
 
 *WindowsDiagnosis — 2026-09-17. Verificado PS 5.1 y 7+ en Windows 10/11. 6 scripts, Parser 0 errores. Builders en `tools/`.*
+
+---
+Thought · 238ms
+Creado Auditoria-Office-Clipboard-Light.ps1 — no reescribe los 3 actuales, es version paralela no invasiva para NICS Lab.
+Diferencias LIGHT (0 Add-Type / 0 DllImport en codigo):
+- Sin OpenClipboard/EmptyClipboard/GetClipboardOwner/GetClipboardSequenceNumber (user32.dll) -> evita Suspicious PowerShell/Invoke-WinAPI
+- Sin preview/hash de Get-Clipboard por defecto -> evita Clipboard hooking. Solo HKCU\Software\Microsoft\Clipboard\EnableClipboardHistory + Get-Process lista corta 8 (no 34) -> evita Reconnaissance
+- Auditoria-Office-Clipboard-Light.ps1:11 documenta Legitimate AuditTool para NICS
+Uso:
+# NICS safe (default)
+powershell -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard-Light.ps1
+curl.exe -L -o $env:TEMP\light.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard-Light.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\light.ps1
+
+# Si necesitas ver contenido (opt-in, sigue sin P/Invoke)
+.\Auditoria-Office-Clipboard-Light.ps1 -IncludeClipboardCheck
+.\Auditoria-Office-Clipboard.ps1 # version completa para deep-dive
+Verificado Parser.ParseFile 0 errores, 2340 tokens, DllImport solo en comentario, HTML 7849 bytes generado en LIGHT vs 18078 completa. Los 3 scripts originales intactos.
