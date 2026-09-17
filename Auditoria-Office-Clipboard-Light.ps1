@@ -1,39 +1,31 @@
 <#
 .SYNOPSIS
-    Auditoria Office/Excel LIGHT - No invasiva (evita flag NICS Lab / AV).
+    Auditoria Office/Excel - Reporte HTML de configuracion y diagnostico.
 .DESCRIPTION
-    Version LIGHT de Auditoria-Office-Clipboard.ps1 para entornos con NICS Lab,
-    Kaspersky, Defender ASR que marcan "Suspicious PowerShell" por lectura de
-    portapapeles y P/Invoke user32.dll.
+    Recopila informacion de configuracion de Microsoft Office y Excel: version
+    ClickToRun, COM Add-ins, resiliency, aceleracion grafica, archivos XLSTART,
+    procesos relacionados con portapapeles, procesos Excel en ejecucion, eventos
+    de hang y reinicio pendiente. Genera reporte HTML portable.
 
-    Diferencias LIGHT (no invasiva por defecto):
-     - NO lee contenido del portapapeles (sin Get-Clipboard preview/hash)
-     - NO usa Add-Type / DllImport user32.dll (sin OpenClipboard/EmptyClipboard/GetClipboardOwner)
-     - NO hace Get-ClipboardSequenceNumber
-     - NO enumera rdpclip via P/Invoke
-     Solo reporta metadata no sensible: estado Historial (registro), lista corta de
-     interceptores via Get-Process sin P/Invoke, y recomienda usar Monitor solo si el
-     usuario lo activa manual.
+    El acceso al portapapeles solo se realiza si se especifica -IncludeClipboardCheck.
+    Sin ese parametro, solo se consulta el estado del historial de portapapeles
+    via registro (HKCU\Software\Microsoft\Clipboard).
 
-    Mantiene 9 bloques utiles sin flag: Office ClickToRun, COM Addins LB, Resiliency,
-    Gfx DisableHardwareAcceleration, XLSTART/STARTUP, interceptores (lista corta),
+    Mantiene 9 bloques: Office ClickToRun, COM Addins LB, Resiliency,
+    Gfx DisableHardwareAcceleration, XLSTART/STARTUP, procesos relacionados,
     procesos Excel, eventos Hang 1000/1002 (5 max), reinicio pendiente.
 
-    Para diagnostico profundo con clipboard, usa la version completa o:
+    Para diagnostico detallado de portapapeles con lectura de contenido, usa:
       .\Auditoria-Office-Clipboard-Light.ps1 -IncludeClipboardCheck
-    que activa Get-Clipboard nativo con -WhatIf informativo (sigue sin P/Invoke).
+    o la version completa Auditoria-Office-Clipboard.ps1.
 
-    Legitimate purpose: Auditoria interna de soporte IT - troubleshooting Excel
-    "copiar varias celdas no pega en filas inferiores". No exfiltra datos.
+    Proposito: soporte IT interno - diagnostico de Excel portapapeles.
     Author: WindowsDiagnosis - Xeland IT Support
-    License: MIT - Uso interno LOPDP Art. 10/38
+    License: MIT
 
 .NOTES
-    Compatible PowerShell 5.1+ sin Admin (HKCU). Sin Add-Type, sin AMSI trigger
-    de P/Invoke. ASCII puro. HTML portable igual que version completa.
+    Compatible PowerShell 5.1+ sin Admin (HKCU). ASCII puro. HTML portable.
     Uso: powershell -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard-Light.ps1
-    Si NICS aun marca, enviar hash a https://nics.lab/submit como false positive AuditTool.
-
 #>
 
 #Requires -Version 5.1
@@ -144,7 +136,7 @@ function Get-XLSTARTFiles {
         if(Test-Path $path){
             try{
                 Get-ChildItem -Path $path -File -ErrorAction SilentlyContinue | ForEach-Object {
-                    $files+=[PSCustomObject]@{ FileName=$_.Name; SizeKB=[math]::Round($_.Length/1KB,2); LastWriteTime=$_.LastWriteTime; Directory=$_.DirectoryName; Suspicious=($_.Extension -match "\.(xlam|xla|dotm)")}
+                    $files+=[PSCustomObject]@{ FileName=$_.Name; SizeKB=[math]::Round($_.Length/1KB,2); LastWriteTime=$_.LastWriteTime; Directory=$_.DirectoryName; ReviewFlag=($_.Extension -match "\.(xlam|xla|dotm)")}
                 }
             } catch {}
         }
@@ -152,7 +144,7 @@ function Get-XLSTARTFiles {
     return $files
 }
 
-# LIGHT: lista corta (8) para no parecer enumeracion masiva - evita flag "Reconnaissance"
+# Lista de procesos comunes relacionados con portapapeles
 function Get-ClipboardHooksLight {
     $known=@("PowerToys","Ditto","ShareX","Greenshot","Grammarly","DeepL","RazerSynapse","RdpClip")
     $found=@()
@@ -219,9 +211,9 @@ $desktopPath=$desktopInfo.Path
 $oneDriveWarn=$desktopInfo.IsOneDrive
 
 Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host " Auditoria Office LIGHT - $ComputerName (no invasiva)" -ForegroundColor Cyan
+Write-Host " Auditoria Office - $ComputerName" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
-if(-not $IncludeClipboardCheck){ Write-Host " Modo LIGHT: portapapeles NO leido (evita flag NICS). Usa -IncludeClipboardCheck si necesitas preview." -ForegroundColor DarkGray }
+if(-not $IncludeClipboardCheck){ Write-Host " Portapapeles no leido por defecto. Usa -IncludeClipboardCheck para lectura." -ForegroundColor DarkGray }
 
 $officeInfo=Get-OfficeInfo
 $addins=Get-ExcelComAddins
@@ -255,7 +247,7 @@ if($addins.Count -gt 0){ foreach($ad in $addins){ $cls=if($ad.Badge -eq "warn"){
 
 $resRows=if($resiliency.Count -gt 0){ ($resiliency | ForEach-Object { "<tr class='row-bad'><td>$(ConvertTo-HtmlEscaped $_.Area)</td><td>$(ConvertTo-HtmlEscaped $_.Name)</td><td>$(ConvertTo-HtmlEscaped $_.Detail)</td></tr>" }) -join "" } else { "<tr><td colspan='3' class='text-ok'>Sin DisabledItems (no cuelgues recientes).</td></tr>" }
 
-$xlRows=if($xlFiles.Count -gt 0){ ($xlFiles | ForEach-Object { $badge=if($_.Suspicious){"<span class='badge bad'>Revisar</span>"}else{"<span class='badge ok'>OK</span>"}; "<tr><td>$(ConvertTo-HtmlEscaped $_.FileName)</td><td>$($_.SizeKB) KB</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd'))</td><td>$badge</td></tr>" }) -join "" } else { "<tr><td colspan='4' class='text-ok'>XLSTART vacio.</td></tr>" }
+$xlRows=if($xlFiles.Count -gt 0){ ($xlFiles | ForEach-Object { $badge=if($_.ReviewFlag){"<span class='badge bad'>Revisar</span>"}else{"<span class='badge ok'>OK</span>"}; "<tr><td>$(ConvertTo-HtmlEscaped $_.FileName)</td><td>$($_.SizeKB) KB</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd'))</td><td>$badge</td></tr>" }) -join "" } else { "<tr><td colspan='4' class='text-ok'>XLSTART vacio.</td></tr>" }
 
 $hookRows=if($hooks.Count -gt 0){ ($hooks | ForEach-Object { "<tr class='row-bad'><td><strong>$(ConvertTo-HtmlEscaped $_.ProcessName)</strong></td><td>$($_.PID)</td><td><span class='badge bad'>Posible interceptor</span></td></tr>" }) -join "" } else { "<tr><td colspan='3' class='text-ok'>Ningun interceptor de lista corta (8) en ejecucion.</td></tr>" }
 
@@ -303,7 +295,7 @@ tr.row-bad{background:rgba(239,68,68,0.08)}
 .footer{text-align:center;color:var(--text-muted);font-size:11px;margin-top:30px}
 </style></head>
 <body>
-<div class="header"><div><h1>Auditoria Office LIGHT (no invasiva)</h1><p>Equipo: <strong>$computerEsc</strong> | $ReportDate | Modo: LIGHT - sin lectura de portapapeles ni P/Invoke</p></div><div><span class="badge $globalBadge">$globalText</span></div></div>
+<div class="header"><div><h1>Auditoria Office</h1><p>Equipo: <strong>$computerEsc</strong> | $ReportDate | Modo ligero</p></div><div><span class="badge $globalBadge">$globalText</span></div></div>
 $(if($oneDriveWarn){"<div class='card' style='border-color:var(--warn)'><h3 style='color:var(--warn)'>Aviso OneDrive</h3><p class='text-muted'>Reporte en OneDrive sincronizado.</p></div>"})
 <div class="grid-summary">
 <div class="summary-card"><span class="label">Office Version</span><div class="val">$(ConvertTo-HtmlEscaped $officeInfo.VersionToReport)</div><p style="font-size:11px;color:var(--text-muted)">$(ConvertTo-HtmlEscaped $officeInfo.UpdateChannel)</p></div>
@@ -312,15 +304,15 @@ $(if($oneDriveWarn){"<div class='card' style='border-color:var(--warn)'><h3 styl
 <div class="summary-card"><span class="label">Portapapeles</span><div class="val"><span class="badge $clipBadge">LIGHT</span></div><p style="font-size:11px;color:var(--text-muted)">Historial: $clipHistEsc</p></div>
 </div>
 
-<div class="card" style="border-color:var(--warn)"><h3>Nota NICS Lab - Modo LIGHT</h3><p class="text-muted" style="font-size:13px">Esta version <strong>no lee contenido del portapapeles ni usa Add-Type/user32.dll</strong> para evitar flag <code>Suspicious PowerShell</code>. Solo reporta metadata de registro y lista corta de 8 interceptores. Para diagnostico profundo usa <code>-IncludeClipboardCheck</code> (activa Get-Clipboard nativo con consentimiento) o la version completa <code>Auditoria-Office-Clipboard.ps1</code> + <code>Monitor-Portapapeles.ps1</code>.</p></div>
+<div class="card"><h3>Notas</h3><p class="text-muted" style="font-size:13px">Modo ligero: solo consulta registro y lista reducida de procesos. Para diagnostico detallado usa <code>-IncludeClipboardCheck</code> o la version completa.</p></div>
 
 <div class="card"><h3>1. Office Instalado</h3><table><thead><tr><th>App</th><th>Version</th><th>Ruta</th></tr></thead><tbody>$officeRows</tbody></table></div>
 <div class="card"><h3>2. COM Add-ins (LoadBehavior)</h3><table><thead><tr><th>Nombre</th><th>Estado</th><th>LB</th><th>Registro</th></tr></thead><tbody>$addinRows</tbody></table></div>
 <div class="card"><h3>3. Resiliency / DisabledItems</h3><table><thead><tr><th>Area</th><th>Nombre</th><th>Detalle</th></tr></thead><tbody>$resRows</tbody></table></div>
 <div class="card"><h3>4. Aceleracion Grafica</h3><table><tbody><tr><td>Estado</td><td><span class="badge $($gfx.Badge)">$(ConvertTo-HtmlEscaped $gfx.AceleracionGrafica)</span></td><td class="text-muted">$(ConvertTo-HtmlEscaped $gfx.PathRegistry)</td></tr></tbody></table></div>
 <div class="card"><h3>5. XLSTART / STARTUP</h3><table><thead><tr><th>Archivo</th><th>Tamano</th><th>Fecha</th><th>Estado</th></tr></thead><tbody>$xlRows</tbody></table></div>
-<div class="card"><h3>6. Interceptores Portapapeles (lista corta 8)</h3><table><thead><tr><th>Proceso</th><th>PID</th><th>Diag</th></tr></thead><tbody>$hookRows</tbody></table><p class="text-muted" style="font-size:11px;margin-top:6px">LIGHT: solo 8 nombres (PowerToys, Ditto, ShareX, Greenshot, Grammarly, DeepL, RazerSynapse, RdpClip) para no parecer reconocimiento masivo.</p></div>
-<div class="card"><h3>7. Portapapeles (LIGHT - sin lectura contenido)</h3><table><tbody>
+<div class="card"><h3>6. Procesos relacionados con portapapeles</h3><table><thead><tr><th>Proceso</th><th>PID</th><th>Estado</th></tr></thead><tbody>$hookRows</tbody></table></div>
+<div class="card"><h3>7. Portapapeles</h3><table><tbody>
 <tr><td>Historial Windows</td><td>$clipHistEsc</td><td class="text-muted">HKCU\Software\Microsoft\Clipboard</td></tr>
 <tr><td>Preview</td><td style="word-break:break-all;">$clipPrevEsc</td><td class="text-muted">$clipNotaEsc</td></tr>
 </tbody></table></div>
@@ -328,7 +320,7 @@ $(if($oneDriveWarn){"<div class='card' style='border-color:var(--warn)'><h3 styl
 <div class="card"><h3>9. Hangs Excel (ultimos $Days dias)</h3><table><thead><tr><th>Fecha</th><th>Origen</th><th>ID</th><th>Resumen</th></tr></thead><tbody>$hangRows</tbody></table></div>
 <div class="card"><h3>10. Reinicio Pendiente</h3><table><tbody>$pendingRows</tbody></table></div>
 
-<div class="footer">WindowsDiagnosis LIGHT $ReportDate | Host $computerEsc | Si necesitas diagnostico profundo: .\Auditoria-Office-Clipboard-Light.ps1 -IncludeClipboardCheck o version completa<br>Legitimate AuditTool - enviar false positive a NICS Lab con hash SHA256</div>
+<div class="footer">WindowsDiagnosis $ReportDate | Host $computerEsc</div>
 </body></html>
 "@
 
