@@ -1,16 +1,11 @@
 <#
 .SYNOPSIS
-    Auditoria integral Office / Excel - Cuelgues, bloqueo de portapapeles y configuracion, con reporte HTML.
+    Auditoria Office / Excel - Configuracion y diagnostico con reporte HTML.
 .DESCRIPTION
-    Detecta la causa raiz de "copio varias celdas en Excel y no se pegan en filas inferiores":
+    Recopila informacion de configuracion de Office y Excel: version ClickToRun,
     COM Add-ins con LoadBehavior, Resiliency/DisabledItems, aceleracion grafica,
-    archivos en XLSTART/STARTUP, procesos que interceptan el portapapeles (PowerToys,
-    Ditto, ShareX...), salud del portapapeles via Win32 API, version/canal ClickToRun,
-    eventos 1000/1001/1002 de excel.exe, y ajustes de registro de Excel.
-
-    Corrige todos los errores de sintaxis del snippet original (espacios faltantes
-    en foreach/in, Get-ItemProperty -Path, operador -contains, Get-WinEvent -FilterHashtable,
-    y tuberias \vert{} mal formadas).
+    archivos en XLSTART/STARTUP, procesos en ejecucion, estado de portapapeles,
+    eventos 1000/1001/1002 de excel.exe y ajustes de registro.
 
     Genera reporte HTML portable (CSS inline, sin CDN/JS) en Escritorio o ruta indicada.
     Tambien puede exportar JSON con -AsJson o usarse dot-sourced como modulo.
@@ -381,7 +376,7 @@ function Get-ClipboardHookProcesses {
                 }
             }
     } catch {}
-    # Tambien buscar por ventana: rdpclip es clasico que rompe portapapeles en RDP
+    # Tambien verificar rdpclip en sesion RDP
     try {
         $rdp = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue
         if ($rdp -and -not ($found | Where-Object { $_.ProcessName -eq "rdpclip" })) {
@@ -613,7 +608,7 @@ if ($AsJson -and -not $isDotSourced) {
 
 # Recoleccion para HTML (auto-ejecuta aun sin params, como snippet original)
 Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host " Auditoria Office / Portapapeles - $ComputerName" -ForegroundColor Cyan
+Write-Host " Auditoria Office - $ComputerName" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 
 Write-Host "[1/10] Info de Office (ClickToRun / MSI)..." -ForegroundColor Yellow
@@ -626,9 +621,9 @@ Write-Host "[4/10] Aceleracion grafica..." -ForegroundColor Yellow
 $gfx = Get-OfficeGfxAccelerationStatus
 Write-Host "[5/10] Archivos XLSTART/STARTUP..." -ForegroundColor Yellow
 $xlFiles = Get-ExcelXLSTARTFiles
-Write-Host "[6/10] Procesos que interceptan portapapeles..." -ForegroundColor Yellow
+Write-Host "[6/10] Procesos en ejecucion..." -ForegroundColor Yellow
 $hooks = Get-ClipboardHookProcesses
-Write-Host "[7/10] Salud del portapapeles (API)..." -ForegroundColor Yellow
+Write-Host "[7/10] Estado de portapapeles..." -ForegroundColor Yellow
 $clipHealth = Test-ClipboardHealth
 Write-Host "[8/10] Registro Excel / ProtectedView..." -ForegroundColor Yellow
 $regTweaks = Get-ExcelRegistryTweaks
@@ -741,10 +736,10 @@ if ($hooks.Count -gt 0) {
         $hookBad++
         $pnEsc = ConvertTo-HtmlEscaped $h.ProcessName
         $pathEsc = ConvertTo-HtmlEscaped $h.Path
-        $hookRows += "<tr class='row-bad'><td><strong>$pnEsc</strong></td><td>$($h.PID)</td><td style='word-break:break-all;'>$pathEsc</td><td><span class='badge bad'>Intercepta portapapeles</span></td></tr>"
+        $hookRows += "<tr class='row-bad'><td><strong>$pnEsc</strong></td><td>$($h.PID)</td><td style='word-break:break-all;'>$pathEsc</td><td><span class='badge bad'>En ejecucion</span></td></tr>"
     }
 } else {
-    $hookRows = "<tr><td colspan='4' class='text-ok'>Ningun proceso conocido de interceptacion de portapapeles en ejecucion.</td></tr>"
+    $hookRows = "<tr><td colspan='4' class='text-ok'>Ningun proceso de la lista en ejecucion.</td></tr>"
 }
 
 # Clipboard health
@@ -854,7 +849,7 @@ $htmlContent = @"
 <body>
     <div class="header">
         <div>
-            <h1>Auditoria Office / Excel - Portapapeles</h1>
+            <h1>Auditoria Office / Excel</h1>
             <p>Equipo: <strong>$computerEsc</strong> | Usuario: <strong>$userEsc</strong> | Fecha: $ReportDate | Rango eventos: $Days dias</p>
         </div>
         <div><span class="badge $globalBadge">$globalText</span></div>
@@ -870,18 +865,18 @@ $htmlContent = @"
     </div>
 
     <div class="card $(if($hookBad -gt 0){'card-bad'}else{''})">
-        <h3>Diagnostico Rapido - Tu caso (copiar varias celdas no pega en filas inferiores)</h3>
+        <h3>Diagnostico Rapido - Copiar varias celdas</h3>
         <div class="rec-box $(if($hookBad -gt 0 -or $clipBadge -eq 'bad'){'bad'}else{''})">
             <strong>Causas mas probables (en orden):</strong>
             <ol style="margin:8px 0 0 18px;">
-                <li><strong>Otro programa roba el portapapeles</strong> tras copiar (Ditto/ClipboardFusion/PowerToys/RdpClip/Grammarly). Si arriba ves 1+ procesos en <code>Interceptores detectados</code>, cierra ese programa y vuelve a probar. Usa <code>Monitor-Portapapeles.ps1</code> para confirmarlo en vivo.</li>
+                <li><strong>Programa en ejecucion</strong> tras copiar (ver tabla procesos). Si arriba ves 1+ procesos, cierra ese programa y vuelve a probar.</li>
                 <li><strong>COM Add-in en mal estado</strong> - LoadBehavior 3 con cuelgues recientes (ver tabla Add-ins + eventos 1002 Hang). Deshabilita desde Excel &gt; Opciones &gt; Complementos &gt; COM.</li>
                 <li><strong>Aceleracion grafica</strong> - Si Excel se cuelga al copiar rangos grandes, desactivala: Archivo &gt; Opciones &gt; Avanzado &gt; Mostrar &gt; Deshabilitar aceleracion grafica de hardware (equivale a <code>DisableHardwareAcceleration=1</code>).</li>
-                <li><strong>Archivo en XLSTART/PERSONAL.XLSB</strong> corrupto que intercepta copiar/pegar.</li>
-                <li><strong>Portapapeles bloqueado</strong> - <code>CanOpenClipboard=No</code> indica otro proceso con OpenClipboard sin cerrar. Reinicia Excel tras cerrar el interceptor.</li>
+                <li><strong>Archivo en XLSTART/PERSONAL.XLSB</strong> relacionado con inicio automatico.</li>
+                <li><strong>Portapapeles no disponible</strong> - <code>CanOpenClipboard=No</code> indica otro proceso con portapapeles abierto sin cerrar. Reinicia Excel.</li>
                 <li><strong>RDP</strong> - Si estas en Escritorio Remoto, ejecuta <code>taskkill /f /im rdpclip.exe &amp;&amp; rdpclip.exe</code> en el remoto.</li>
             </ol>
-            <p style="margin-top:10px;">Prueba de descarte inmediata: abre Excel en modo seguro (<code>excel /safe</code>) y copia el mismo rango. Si ahi si funciona, es un Add-in o XLSTART.</p>
+            <p style="margin-top:10px;">Prueba de descarte: abre Excel en modo seguro (<code>excel /safe</code>) y copia el mismo rango. Si ahi funciona, es un Add-in o XLSTART.</p>
         </div>
     </div>
 
@@ -915,22 +910,22 @@ $htmlContent = @"
     </div>
 
     <div class="card $(if($hookBad -gt 0){'card-bad'}else{'card-ok'})">
-        <h3>6. Procesos que Interceptan el Portapapeles</h3>
-        <table><thead><tr><th>Proceso</th><th>PID</th><th>Ruta</th><th>Diagnostico</th></tr></thead><tbody>$hookRows</tbody></table>
-        <p class="text-muted" style="font-size:11px; margin-top:6px;">Lista de 30+ interceptores conocidos (PowerToys, Ditto, ShareX, Greenshot, Grammarly, DeepL, KeePass, RdpClip...). Cierra el sospechoso y repite la copia en Excel.</p>
+        <h3>6. Procesos en ejecucion</h3>
+        <table><thead><tr><th>Proceso</th><th>PID</th><th>Ruta</th><th>Estado</th></tr></thead><tbody>$hookRows</tbody></table>
+        <p class="text-muted" style="font-size:11px; margin-top:6px;">Lista de procesos comunes. Si alguno aparece, prueba cerrarlo y repite la copia en Excel.</p>
     </div>
 
     <div class="card $clipCardClass">
-        <h3>7. Salud del Portapapeles (Win32 API)</h3>
+        <h3>7. Portapapeles</h3>
         <table><tbody>
-            <tr><td>OpenClipboard disponible</td><td><span class="badge $clipBadge">$clipOpenEsc</span></td><td>Si es "bloqueado", otro proceso tiene el clipboard abierto sin cerrar</td></tr>
-            <tr><td>SequenceNumber</td><td>$clipSeqEsc</td><td class="text-muted">Incrementa en cada SetClipboardData</td></tr>
-            <tr><td>Owner actual</td><td>$clipOwnerEsc</td><td>PID.Owner PID</td></tr>
+            <tr><td>Disponibilidad</td><td><span class="badge $clipBadge">$clipOpenEsc</span></td><td>Si es "bloqueado", otro proceso tiene el portapapeles abierto</td></tr>
+            <tr><td>SequenceNumber</td><td>$clipSeqEsc</td><td class="text-muted">Incrementa en cada actualizacion</td></tr>
+            <tr><td>Owner actual</td><td>$clipOwnerEsc</td><td>PID</td></tr>
             <tr><td>Preview (texto)</td><td style="word-break:break-all;">$clipPrevEsc</td><td class="text-muted">Primeros 80 chars</td></tr>
-            <tr><td>Formatos</td><td>$clipFmtEsc</td><td class="text-muted">Incluye estado Historial (HKCU\Clipboard)</td></tr>
+            <tr><td>Formatos</td><td>$clipFmtEsc</td><td class="text-muted">Estado Historial (HKCU\Clipboard)</td></tr>
         </tbody></table>
         $(if($clipErrEsc){"<p class='text-muted' style='font-size:11px; margin-top:6px;'>Error: $clipErrEsc</p>"})
-        <div class="rec-box"><strong>Como usar Monitor-Portapapeles.ps1:</strong> ejecuta el segundo script en una consola aparte y luego copia en Excel. Veras en vivo si otro proceso sobreescribe el contenido en &lt;1 seg.</div>
+        <div class="rec-box">Sugerencia: usa Monitor-Portapapeles.ps1 para ver cambios en tiempo real.</div>
     </div>
 
     <div class="card">

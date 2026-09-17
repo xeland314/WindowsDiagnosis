@@ -1,21 +1,17 @@
 <#
 .SYNOPSIS
-    Monitor en tiempo real del portapapeles - detecta que proceso roba/sobrescribe el clipboard.
+    Monitor en tiempo real del portapapeles - registra cambios.
 .DESCRIPTION
-    Para el caso "copio varias celdas en Excel y no se pegan en filas inferiores":
-    queda la duda de si otro programa intercepta el portapapeles tras la copia.
-
-    Este script vigila el portapapeles en bucle (polling + GetClipboardSequenceNumber
-    y GetClipboardOwner) y registra cada cambio con timestamp, PID/proceso dueno,
-    formatos, hash y preview del contenido. Alerta cuando el contenido es
-    sobreescrito en <1.5s por un proceso distinto (patron tipico de Ditto/PowerToys/
-    RdpClip/Grammarly).
+    Para diagnostico de Excel "copio varias celdas y no se pegan en filas inferiores"
+    este script vigila el portapapeles en bucle y registra cada cambio con timestamp,
+    PID/proceso dueno, formatos, hash y preview del contenido. Indica cuando el
+    contenido cambia en <1.5s por un proceso distinto.
 
     No instala nada, no requiere Admin. Usa Win32 API (user32.dll) y Get-Clipboard.
     Compatible PowerShell 5.1+ (STA recomendado).
 
-    Relacionado: Auditoria-Office-Clipboard.ps1 seccion 6 y 7 hace la foto estatica;
-    este script hace la prueba dinamica en vivo.
+    Relacionado: Auditoria-Office-Clipboard.ps1 hace captura estatica;
+    este script hace prueba dinamica en vivo.
 
 .PARAMETER IntervalMs
     Intervalo de sondeo en ms (default 300). Menor = mas preciso pero mas CPU.
@@ -154,16 +150,16 @@ function Get-ClipboardPreview {
     return @{ Preview=$preview; Hash=$hash; Format=$format }
 }
 
-function Get-SuspiciousFlag {
+function Get-ClipboardChangeFlag {
     param($PrevEntry, $CurrEntry, $DeltaMs)
-    # Marca como sospechoso si: cambio en <1500ms, owner distinto, y contenido se vacia o acorta mucho
+    # Marca si: cambio en <1500ms, owner distinto, y contenido se vacia
     if (-not $PrevEntry) { return $false }
     if ($DeltaMs -gt 1500) { return $false }
     if ($CurrEntry.OwnerPID -eq $PrevEntry.OwnerPID -and $CurrEntry.OwnerPID -ne 0) { return $false }
-    # Si el nuevo contenido es vacio o mucho mas corto, probable robo
+    # Si el nuevo contenido es vacio
     if ($CurrEntry.Format -like "Vacio*") { return $true }
     if ($CurrEntry.Preview -eq "(vacio)") { return $true }
-    # Cambio de owner en <1.5s siempre sospechoso si previo era Excel
+    # Cambio de owner en <1.5s si previo era Excel
     if ($PrevEntry.OwnerName -like "*EXCEL*" -and $CurrEntry.OwnerName -notlike "*EXCEL*") { return $true }
     return $false
 }
@@ -175,7 +171,7 @@ if ($LogPath) {
         $dir = Split-Path $LogPath -Parent
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         # Cabecera
-        "Timestamp,SeqNumber,OwnerPID,OwnerName,Format,Hash,Preview,DeltaMs,Suspicious" | Out-File -FilePath $LogPath -Encoding utf8 -Force
+        "Timestamp,SeqNumber,OwnerPID,OwnerName,Format,Hash,Preview,DeltaMs,ChangeFlag" | Out-File -FilePath $LogPath -Encoding utf8 -Force
         $logFile = $LogPath
         Write-Host "Log CSV: $LogPath" -ForegroundColor Gray
     } catch { Write-Host "No se pudo crear log ${LogPath}: $($_.Exception.Message)" -ForegroundColor Yellow }
@@ -186,7 +182,7 @@ Write-Host " Monitor de Portapapeles - Tiempo Real" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host " Intervalo: ${IntervalMs}ms | Duracion: $(if($DurationSec -eq 0){'infinito (Ctrl+C para salir)'}else{"${DurationSec}s"}) | MaxPreview: $MaxPreviewChars chars" -ForegroundColor Gray
 Write-Host " Instrucciones: deja este script corriendo y copia VARIAS celdas en Excel (Ctrl+C)." -ForegroundColor Yellow
-Write-Host " Si otro programa roba el clipboard veras aqui un cambio con Owner distinto en <1.5s marcado ALERTA." -ForegroundColor Yellow
+Write-Host " Si otro programa modifica el portapapeles veras aqui un cambio con Owner distinto en <1.5s marcado ALERTA." -ForegroundColor Yellow
 Write-Host "--------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ("{0,-12} {1,-8} {2,-18} {3,-22} {4}" -f "Hora", "Seq", "Owner", "Formato", "Preview (hash)") -ForegroundColor DarkGray
 Write-Host "--------------------------------------------------" -ForegroundColor DarkGray
@@ -230,13 +226,13 @@ try {
             $clip = Get-ClipboardPreview -MaxChars $MaxPreviewChars
             $ts = $now.ToString("HH:mm:ss.fff")
 
-            $isSuspicious = Get-SuspiciousFlag -PrevEntry $lastEntry -CurrEntry @{ OwnerPID=$owner.PID; OwnerName=$owner.Name; Format=$clip.Format; Preview=$clip.Preview } -DeltaMs $deltaMs
+            $isSuspicious = Get-ClipboardChangeFlag -PrevEntry $lastEntry -CurrEntry @{ OwnerPID=$owner.PID; OwnerName=$owner.Name; Format=$clip.Format; Preview=$clip.Preview } -DeltaMs $deltaMs
 
             $color = "Green"
             $flag = ""
             if ($isSuspicious) {
                 $color = "Red"
-                $flag = " <<< ALERTA: posible robo de portapapeles! ($deltaMs ms, $($lastEntry.OwnerName)->$($owner.Name))"
+                $flag = " <<< ALERTA: cambio rapido de portapapeles! ($deltaMs ms, $($lastEntry.OwnerName)->$($owner.Name))"
                 $alertCount++
                 [Console]::Beep(1200, 250)
             } elseif ($deltaMs -lt 800) {
@@ -288,7 +284,7 @@ try {
     Write-Host "`nInterrumpido por usuario (Ctrl+C)." -ForegroundColor Cyan
 } finally {
     Write-Host "`n==================================================" -ForegroundColor Cyan
-    Write-Host " Resumen: $alertCount alerta(s) de posible robo detectadas." -ForegroundColor $(if($alertCount -gt 0){"Red"}else{"Green"})
+    Write-Host " Resumen: $alertCount alerta(s) de cambio rapido detectadas." -ForegroundColor $(if($alertCount -gt 0){"Red"}else{"Green"})
     if ($alertCount -eq 0) {
         Write-Host " Si copiaste en Excel y no hubo alerta, el portapapeles NO fue sobreescrito por otro proceso." -ForegroundColor Green
         Write-Host " Entonces el problema es interno de Excel: Add-in, XLSTART o aceleracion grafica (ver Auditoria-Office-Clipboard.html)." -ForegroundColor Gray
