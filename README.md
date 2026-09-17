@@ -250,6 +250,10 @@ powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::Security
 powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1))) -All"
 powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1))) -VaciarClipboard -ReiniciarRdpClip -FixHistorial"
 
+# LIGHT no invasiva (NICS Lab)
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex (irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard-Light.ps1)"
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard-Light.ps1))) -IncludeClipboardCheck"
+
 # Alternativa curl (alias de Invoke-WebRequest en PS)
 powershell -ExecutionPolicy Bypass -Command "iex (curl -UseBasicParsing https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1).Content"
 ```
@@ -269,9 +273,14 @@ curl.exe -L -o $env:TEMP\mon.ps1 https://raw.githubusercontent.com/xeland314/Win
 powershell -STA -ExecutionPolicy Bypass -File $env:TEMP\mon.ps1 -IntervalMs 200
 curl.exe -L -o $env:TEMP\fix.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1
 powershell -ExecutionPolicy Bypass -File $env:TEMP\fix.ps1 -All -WhatIf
+# LIGHT no invasiva (recomendada para NICS Lab / Kaspersky)
+curl.exe -L -o $env:TEMP\light.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard-Light.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\light.ps1
+curl.exe -L -o $env:TEMP\light.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard-Light.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\light.ps1 -IncludeClipboardCheck
 ```
 
-Borra tras uso: `Remove-Item $env:TEMP\audit.ps1 -Force`.
+Borra tras uso: `Remove-Item $env:TEMP\audit.ps1,$env:TEMP\light.ps1 -Force`.
 
 > Nota: `Bypass -Scope Process` no persiste y no requiere Admin salvo `MachinePolicy` via GPO. En `ConstrainedLanguage` el one-liner falla — usa archivo local y firma.
 
@@ -285,6 +294,7 @@ WindowsDiagnosis/
   Auditoria-Autoarranque.ps1       # 1262 lineas, ASCII
   Auditoria-LOPDP-Endpoint.ps1     # 1026 lineas, ASCII
   Auditoria-Office-Clipboard.ps1   # ~1000 lineas, ASCII (12 bloques Office/clipboard)
+  Auditoria-Office-Clipboard-Light.ps1 # ~340 lineas, ASCII (LIGHT no invasiva NICS)
   Monitor-Portapapeles.ps1         # ~260 lineas, ASCII (tiempo real)
   Reparar-Portapapeles.ps1         # ~380 lineas, ASCII (7 fixes -WhatIf)
   tools/
@@ -317,7 +327,7 @@ python tools/build_lopdp.py
 
 ---
 
-*WindowsDiagnosis — 2026-09-17. Verificado PS 5.1 y 7+ en Windows 10/11. 6 scripts, Parser 0 errores. Builders en `tools/`.*
+*WindowsDiagnosis — 2026-09-17. Verificado PS 5.1 y 7+ en Windows 10/11. 7 scripts, Parser 0 errores. Builders en `tools/`.*
 
 ---
 Thought · 238ms
