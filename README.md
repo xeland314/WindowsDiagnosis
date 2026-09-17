@@ -231,6 +231,31 @@ pwsh -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard.ps1
 Salidas `Auditoria-Office` en `Desktop\Auditoria_Office_<HOST>_<fecha>.html` + `Start-Process` automatico (o `-NoOpen`). `Monitor` en consola + CSV. `Reparar` en consola + backup `.reg` en `%TEMP%\OfficeClipFix_*`. HTML sin recursos externos, abre en Edge/Chrome/Firefox y en `file://`.
 Flujo recomendado Office: `Auditoria-Office-Clipboard` -> `Monitor-Portapapeles` (copia en Excel) -> `Reparar-Portapapeles -All` -> re-probar copia.
 
+### Ejecucion sin descargar (curl / irm) — one-liner en memoria
+
+No requiere clonar ni guardar `.ps1`. Usa `Invoke-RestMethod` (`irm`) + `Invoke-Expression` (`iex`) contra `raw.githubusercontent.com` (TLS 1.2).
+
+```powershell
+# Auditoria Office (HTML en Escritorio)
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex (irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1)"
+# con params (ej. 7 dias, sin abrir)
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1))) -Days 7 -NoOpen"
+
+# Monitor tiempo real (STA obligatorio)
+powershell -STA -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex (irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Monitor-Portapapeles.ps1)"
+powershell -STA -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Monitor-Portapapeles.ps1))) -IntervalMs 200 -DurationSec 60 -LogPath C:\diag\clip.csv"
+
+# Reparar (preview luego fix real)
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1))) -All -WhatIf"
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1))) -All"
+powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1))) -VaciarClipboard -ReiniciarRdpClip -FixHistorial"
+
+# Alternativa curl (alias de Invoke-WebRequest en PS)
+powershell -ExecutionPolicy Bypass -Command "iex (curl -UseBasicParsing https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1).Content"
+```
+
+> Nota: `Bypass -Scope Process` no persiste y no requiere Admin salvo `MachinePolicy` via GPO. En `ConstrainedLanguage` el one-liner falla — usa archivo local y firma.
+
 ---
 
 ## Estructura del repo y builders
