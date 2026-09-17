@@ -254,6 +254,25 @@ powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::Security
 powershell -ExecutionPolicy Bypass -Command "iex (curl -UseBasicParsing https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1).Content"
 ```
 
+### Alternativa para Kaspersky / AV (evita fileless `iex`, menos deteccion)
+
+`iex (irm ...)` es patron fileless y Kaspersky lo marca `HEUR:Trojan.PowerShell.Generic`. Para AV usa descarga a archivo temporal + `-File`:
+
+```powershell
+curl.exe -L -o $env:TEMP\audit.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\audit.ps1
+# con params
+curl.exe -L -o $env:TEMP\audit.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Auditoria-Office-Clipboard.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\audit.ps1 -Days 7 -NoOpen
+# Monitor y Reparar igual
+curl.exe -L -o $env:TEMP\mon.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Monitor-Portapapeles.ps1
+powershell -STA -ExecutionPolicy Bypass -File $env:TEMP\mon.ps1 -IntervalMs 200
+curl.exe -L -o $env:TEMP\fix.ps1 https://raw.githubusercontent.com/xeland314/WindowsDiagnosis/main/Reparar-Portapapeles.ps1
+powershell -ExecutionPolicy Bypass -File $env:TEMP\fix.ps1 -All -WhatIf
+```
+
+Borra tras uso: `Remove-Item $env:TEMP\audit.ps1 -Force`.
+
 > Nota: `Bypass -Scope Process` no persiste y no requiere Admin salvo `MachinePolicy` via GPO. En `ConstrainedLanguage` el one-liner falla — usa archivo local y firma.
 
 ---
