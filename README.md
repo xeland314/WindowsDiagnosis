@@ -1,6 +1,6 @@
 # WindowsDiagnosis — Diagnostico, Auditoria y Cumplimiento LOPDP para Windows
 
-> Tres scripts **PowerShell sin dependencias** que generan reportes **HTML portables** (CSS inline, sin CDN/JS) para soporte tecnico, caza de persistencia y auditoria de cumplimiento **LOPDP Art. 10 y 38** (Ecuador). Compatibles **Windows 10 21H2+ / Windows 11** con **PowerShell 5.1** (Desktop) y **7+** (Core).
+> Seis scripts **PowerShell sin dependencias** que generan reportes **HTML portables** (CSS inline, sin CDN/JS) para soporte tecnico, caza de persistencia, auditoria **LOPDP Art. 10 y 38** (Ecuador) y diagnostico/reparacion de **Office/Excel/portapapeles**. Compatibles **Windows 10 21H2+ / Windows 11** con **PowerShell 5.1** (Desktop) y **7+** (Core).
 
 > **Sin tildes en codigo ni en HTML:** todo ASCII para que PowerShell 5.1 —que lee `.ps1` como ANSI si no tiene BOM— no rompa `Write-Host` ni comentarios al copiar desde USB. El HTML sigue declarando `UTF-8` (`<meta charset="UTF-8">` + `http-equiv`) y se escribe con `[System.IO.File]::WriteAllText(..., UTF8)` (con BOM) para Notepad/navegador, pero el contenido evita diacriticos y evita mojibake en `file://`.
 
@@ -12,6 +12,9 @@
 - [Diagnostico-PC-HTML.ps1 — 12 bloques](#diagnostico-pc-htmlps1---12-bloques)
 - [Auditoria-Autoarranque.ps1 — 10 bloques](#auditoria-autoarranqueps1---10-bloques-persistencia-y-caza-de-amenazas)
 - [Auditoria-LOPDP-Endpoint.ps1 — 5 bloques](#auditoria-lopdp-endpointps1---5-bloques-cumplimiento-lopdp)
+- [Auditoria-Office-Clipboard.ps1 — 12 bloques (Office/portapapeles)](#auditoria-office-clipboardps1---12-bloques-officeportapapeles)
+- [Monitor-Portapapeles.ps1 — tiempo real](#monitor-portapapelesps1---tiempo-real)
+- [Reparar-Portapapeles.ps1 — reparacion](#reparar-portapapelesps1---reparacion)
 - [Puntos ciegos cubiertos](#puntos-ciegos-cubiertos)
 - [Requisitos y compatibilidad](#requisitos-y-compatibilidad)
 - [Uso rapido](#uso-rapido)
@@ -27,6 +30,9 @@
 | `Diagnostico-PC-HTML.ps1` | **Salud tecnica** del equipo (hardware, SO, red, updates) | `Desktop\Diagnostico_<HOST>_<fecha>.html` | Ticket de lentitud, inventario, entrega a usuario/soporte |
 | `Auditoria-Autoarranque.ps1` | **Persistencia y masquerading** T1036/T1496/T1546.003 — caso FAHConsole en WinZip | `Desktop\Auditoria_Autoarranque_<HOST>_<fecha>.html` | Sospecha de minero/PUP, DFIR, revision de autoarranque |
 | `Auditoria-LOPDP-Endpoint.ps1` | **Cumplimiento LOPDP Art.10/38** — 10 bloques (BitLocker, puertos, Firewall, AV, admins + bloqueo, cuentas, LAPS/NLA/SMB, remote/logs/EOL, Defender+/SecureBoot) | `Desktop\Auditoria_LOPDP_<HOST>_<fecha>.html` | Auditoria legal, visita Superintendencia, rodo de laptops contables |
+| `Auditoria-Office-Clipboard.ps1` | **Office/Excel + portapapeles** — copia de varias celdas que no pega en filas inferiores | `Desktop\Auditoria_Office_<HOST>_<fecha>.html` | Excel se cuelga al copiar, portapapeles vacio/bloqueado, Add-ins, Gfx, XLSTART |
+| `Monitor-Portapapeles.ps1` | **Monitor tiempo real** del portapapeles (GetClipboardOwner) | Consola + opcional `clip.csv` | Ver en vivo si otro programa roba el clipboard tras Ctrl+C en Excel |
+| `Reparar-Portapapeles.ps1` | **Reparacion** reversible con `-WhatIf` (7 fixes) | Consola + backup `.reg` en `%TEMP%` | Aplicar fix tras auditar: rdpclip, vaciar clipboard, historial, Gfx, CutCopyMode, Add-ins |
 
 Builders (solo desarrollo, no necesarios para ejecutar):
 
@@ -103,6 +109,65 @@ Resumen global `grid-summary` con 10 bloques (`totalBad` = core 5 + extra 5). Se
 
 ---
 
+## Auditoria-Office-Clipboard.ps1 — 12 bloques (Office/portapapeles)
+
+Corrige el snippet original (espacios faltantes `foreach ($path in $paths)`, `Get-ItemProperty -Path $_.PSPath`, `-contains`, `Get-WinEvent -FilterHashtable $filter`, `try/catch` en hashtable).
+
+| # | Bloque | Fuente | Que detecta | Hallazgo |
+|---|--------|--------|-------------|----------|
+| 1 | Office instalado | `HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration` + `Office16\EXCEL.EXE` VersionInfo / fallback MSI | Version `16.0.13801`, canal `Current/Monthly/SemiAnnual`, Producto `ProPlus2019Retail` | `warn` si canal desactualizado |
+| 2 | COM Add-ins Excel | `HKCU/HKLM\...\Excel\Addins` (`LoadBehavior`) | `3=Activo inicio`, `2=Desactivado`, `0=Desconectado` | `warn` si `3` + cuelgue |
+| 3 | Resiliency / DisabledItems | `HKCU\...\Excel\Resiliency\DisabledItems`, `CrashingAddinList` | Excel ya deshabilito Add-in tras cuelgue | `bad` si hay entradas |
+| 4 | Aceleracion grafica | `HKCU\...\Common\Graphics\DisableHardwareAcceleration` + GPO | `1=deshabilitada`, `0=activa` | `warn` si GPO fuerza off |
+| 5 | XLSTART / STARTUP | `%APPDATA%\Microsoft\Excel\XLSTART`, `Word\STARTUP`, `PERSONAL.XLSB` | `.xlam/.xla/.dotm` auto-carga | `bad` si `PERSONAL.XLSB` corrupto |
+| 6 | Interceptores portapapeles | `Get-Process` vs 34 nombres (`PowerToys`, `Ditto`, `ShareX`, `Grammarly`, `DeepL`, `RdpClip`...) | Proceso roba clipboard | `bad` si 1+ detectado |
+| 7 | Salud portapapeles | Win32 `OpenClipboard`/`GetClipboardSequenceNumber`/`GetClipboardOwner` + `Get-Clipboard` + `HKCU\Software\Microsoft\Clipboard` (Historial) | `CanOpen=bloqueado`, Owner PID, formatos, preview | `bad` si bloqueado |
+| 8 | Registro Excel | `...\Excel\Options`, `Security\ProtectedView` | `DDEAllowed`, `ProtectedView` | info |
+| 9 | Procesos Excel | `Get-Process EXCEL` (`Responding`, `CPU`, `RAM`, `Handles`) | `No responde` = colgado | `bad` si colgado |
+| 10 | Eventos Hang/Crash | `Get-WinEvent` Application `1000/1001/1002` ultimos 14 dias filtro `excel.exe` | Hang (1002) / Crash (1000) | `bad` si hay |
+| 11 | Reinicio pendiente | `CBS RebootPending`, `WU RebootRequired`, `PendingFileRenameOperations` | Reboot post-update deja clipboard inestable | `bad` si pendiente |
+| 12 | Recomendaciones | Recuadro diagnostico rapido | Orden: interceptores -> `excel /safe` -> Gfx -> XLSTART -> Monitor | - |
+
+Incluye `Invoke-OfficeAudit -AsJson` y modo modulo `. .\Auditoria-Office-Clipboard.ps1; Get-ExcelComAddins`.
+
+---
+
+## Monitor-Portapapeles.ps1 — tiempo real
+
+Vigila polling `GetClipboardSequenceNumber` + `GetClipboardOwner` -> PID/Name (`user32.dll`) y `Get-Clipboard` preview/hash. Alerta si contenido sobreescrito en `<1.5s` por proceso distinto (patron Ditto/PowerToys/RdpClip), pitido + `<<< ALERTA`.
+
+| Parametro | Default | Detalle |
+|-----------|---------|---------|
+| `-IntervalMs` | `300` | Sondeo ms. `200` mas preciso |
+| `-DurationSec` | `0` (infinito) | `60` para captura de 1 min |
+| `-LogPath` | vacio | `C:\diag\clip.csv` guarda `Timestamp,Seq,OwnerPID,OwnerName,Format,Hash,Preview,DeltaMs,Suspicious` |
+| `-MaxPreviewChars` | `120` | Trunca preview TSV (`|` como separador) |
+| `-IncludeImageHash` | off | Hashea imagen PNG |
+
+Requiere STA (`powershell -STA ...` si avisa `MTA`). Sin Admin.
+
+---
+
+## Reparar-Portapapeles.ps1 — reparacion
+
+7 fixes reversibles, todos con `SupportsShouldProcess` (`-WhatIf`/`-Confirm`) y backup `.reg` en `%TEMP%\OfficeClipFix_*` (via `reg export`).
+
+| Switch | Registro/Accion | Reversible |
+|--------|-----------------|------------|
+| `-VaciarClipboard` | `user32!EmptyClipboard` + `Set-Clipboard $null` + `cmd clip` + `Forms.Clear` | Si (solo vacia) |
+| `-ReiniciarRdpClip` | `Stop-Process rdpclip` + `Start-Process System32\rdpclip.exe` | Si |
+| `-CerrarInterceptores` | `Stop-Process` 26 nombres conocidos | Si (reabrir app) |
+| `-FixHistorial` | `HKCU\Software\Microsoft\Clipboard\EnableClipboardHistory=0` | Si (import .reg) |
+| `-DeshabilitarGfx` | `HKCU\...\Common\Graphics\DisableHardwareAcceleration=1` | Si (poner `0` o borrar) |
+| `-ReiniciarExcel` | `GetActiveComObject Excel.Application.CutCopyMode=$false` + mata solo `Responding=false` (con `-Force` mata todos) | Si |
+| `-FixAddins` | `HKCU/HKLM\...\Excel\Addins\<Name>\LoadBehavior 3->2` (pregunta uno a uno, `-Force` auto) | Si (poner `3`) |
+| `-All` | Activa 1-6 (`FixAddins` solo con `-Force`) | - |
+| `-RepararOffice` | `OfficeC2RClient.exe /update user` | - |
+
+`HKCU` no requiere Admin; `HKLM\...\Addins` si requiere Admin (sale `Acceso denegado` sin romper resto).
+
+---
+
 ## Puntos ciegos cubiertos
 
 Los 6 vectores que identificaste ya estan en `Auditoria-Autoarranque.ps1:5-10` (~linea 230/280/320/360/400/440), todos con `try/catch`, `HtmlEncode` y `badge`:
@@ -115,8 +180,8 @@ Los 6 vectores que identificaste ya estan en `Auditoria-Autoarranque.ps1:5-10` (
 | Requisito | Detalle |
 |-----------|---------|
 | **SO** | Windows 10 21H2+ / Windows 11 (todas las ediciones). No Linux/macOS |
-| **PowerShell** | 5.1 (Desktop, incluido) y 7+ (Core). Sin `??`, ternarios ni `utf8NoBOM` sin fallback. Verificado `Parser.ParseFile` = 0 errores |
-| **Permisos** | Mayoria sin Admin. Requieren Admin: `Get-WinEvent` (Visor), `root/subscription`, `Get-MpPreference`, `HKLM\StartupApproved`, `Get-BitLockerVolume`, `Get-NetFirewallProfile`, `Get-LocalGroupMember`. Sin Admin se muestra `text-muted`/`No verificado` |
+| **PowerShell** | 5.1 (Desktop, incluido) y 7+ (Core). Sin `??`, ternarios ni `utf8NoBOM` sin fallback. Verificado `Parser.ParseFile` = 0 errores (6 scripts) |
+| **Permisos** | Mayoria sin Admin. Requieren Admin: `Get-WinEvent` (Visor), `root/subscription`, `Get-MpPreference`, `HKLM\StartupApproved`, `Get-BitLockerVolume`, `Get-NetFirewallProfile`, `Get-LocalGroupMember`, `HKLM\...\Excel\Addins` (escritura). Sin Admin se muestra `text-muted`/`No verificado`/`Acceso denegado`. Office/Clipboard/Monitor/Reparar (HKCU, vaciar clipboard, rdpclip, CutCopyMode) funcionan sin Admin |
 | **Red** | Offline salvo `Test-Connection` y `winget` (opcionales) |
 | **Codificacion** | `.ps1` ASCII puro. HTML `UTF-8` con BOM via `WriteAllText` + `meta charset` |
 
@@ -129,6 +194,9 @@ Los 6 vectores que identificaste ya estan en `Auditoria-Autoarranque.ps1:5-10` (
 Unblock-File -Path .\Diagnostico-PC-HTML.ps1
 Unblock-File -Path .\Auditoria-Autoarranque.ps1
 Unblock-File -Path .\Auditoria-LOPDP-Endpoint.ps1
+Unblock-File -Path .\Auditoria-Office-Clipboard.ps1
+Unblock-File -Path .\Monitor-Portapapeles.ps1
+Unblock-File -Path .\Reparar-Portapapeles.ps1
 
 # Salud (cualquier usuario)
 powershell -ExecutionPolicy Bypass -File .\Diagnostico-PC-HTML.ps1
@@ -139,11 +207,29 @@ powershell -ExecutionPolicy Bypass -File .\Auditoria-Autoarranque.ps1
 # Cumplimiento LOPDP (requiere Admin para BitLocker/Firewall/Admins)
 powershell -ExecutionPolicy Bypass -File .\Auditoria-LOPDP-Endpoint.ps1
 
+# Office / Portapapeles (no requiere Admin)
+powershell -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard.ps1
+powershell -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard.ps1 -Days 7 -NoOpen -OutputPath C:\diag\office.html
+# JSON / modulo
+powershell -ExecutionPolicy Bypass -Command ".\Auditoria-Office-Clipboard.ps1 -AsJson -JsonPath C:\diag\office.json"
+powershell -ExecutionPolicy Bypass -Command ". .\Auditoria-Office-Clipboard.ps1; Get-ExcelComAddins | Format-Table"
+
+# Monitor tiempo real - dejar corriendo y luego copiar en Excel
+powershell -STA -ExecutionPolicy Bypass -File .\Monitor-Portapapeles.ps1
+powershell -STA -ExecutionPolicy Bypass -File .\Monitor-Portapapeles.ps1 -IntervalMs 200 -DurationSec 60 -LogPath C:\diag\clip.csv
+
+# Reparar portapapeles - preview y luego fix
+powershell -ExecutionPolicy Bypass -File .\Reparar-Portapapeles.ps1 -All -WhatIf
+powershell -ExecutionPolicy Bypass -File .\Reparar-Portapapeles.ps1 -All
+powershell -ExecutionPolicy Bypass -File .\Reparar-Portapapeles.ps1 -All -Force  # incluye FixAddins auto
+powershell -ExecutionPolicy Bypass -File .\Reparar-Portapapeles.ps1 -VaciarClipboard -ReiniciarRdpClip -FixHistorial
+
 # PowerShell 7
-pwsh -ExecutionPolicy Bypass -File .\Auditoria-LOPDP-Endpoint.ps1
+pwsh -ExecutionPolicy Bypass -File .\Auditoria-Office-Clipboard.ps1
 ```
 
-Salidas en `Desktop\*.html` + `Start-Process` automatico. HTML sin recursos externos, abre en Edge/Chrome/Firefox y en `file://`.
+Salidas `Auditoria-Office` en `Desktop\Auditoria_Office_<HOST>_<fecha>.html` + `Start-Process` automatico (o `-NoOpen`). `Monitor` en consola + CSV. `Reparar` en consola + backup `.reg` en `%TEMP%\OfficeClipFix_*`. HTML sin recursos externos, abre en Edge/Chrome/Firefox y en `file://`.
+Flujo recomendado Office: `Auditoria-Office-Clipboard` -> `Monitor-Portapapeles` (copia en Excel) -> `Reparar-Portapapeles -All` -> re-probar copia.
 
 ---
 
@@ -151,9 +237,12 @@ Salidas en `Desktop\*.html` + `Start-Process` automatico. HTML sin recursos exte
 
 ```
 WindowsDiagnosis/
-  Diagnostico-PC-HTML.ps1          # 780 lineas, ASCII
-  Auditoria-Autoarranque.ps1       # 719 lineas, ASCII
-  Auditoria-LOPDP-Endpoint.ps1     # 477 lineas, ASCII
+  Diagnostico-PC-HTML.ps1          # 888 lineas, ASCII
+  Auditoria-Autoarranque.ps1       # 1262 lineas, ASCII
+  Auditoria-LOPDP-Endpoint.ps1     # 1026 lineas, ASCII
+  Auditoria-Office-Clipboard.ps1   # ~1000 lineas, ASCII (12 bloques Office/clipboard)
+  Monitor-Portapapeles.ps1         # ~260 lineas, ASCII (tiempo real)
+  Reparar-Portapapeles.ps1         # ~380 lineas, ASCII (7 fixes -WhatIf)
   tools/
     build_diagnostico.py           # genera Diagnostico-PC-HTML.ps1
     build_auditoria.py             # genera Auditoria-Autoarranque.ps1
@@ -184,4 +273,4 @@ python tools/build_lopdp.py
 
 ---
 
-*WindowsDiagnosis — 2026-09-07. Verificado PS 5.1 y 7+ en Windows 10/11. Builders en `tools/`.*
+*WindowsDiagnosis — 2026-09-17. Verificado PS 5.1 y 7+ en Windows 10/11. 6 scripts, Parser 0 errores. Builders en `tools/`.*
